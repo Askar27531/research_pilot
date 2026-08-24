@@ -1,0 +1,251 @@
+{
+  "run_id": "f249d400-65f2-4b59-8c33-34819315d597",
+  "dataset_name": "ResearchPilot-Eval",
+  "dataset_version": "1.0.0",
+  "started_at": "2026-08-24T07:42:00.962539+00:00",
+  "git_commit": "unavailable",
+  "model_name": "qwen3:14b",
+  "model_digest": "unrecorded",
+  "parameters": {
+    "ollama_timeout_seconds": 300.0
+  },
+  "environment": {
+    "python": "3.12.8",
+    "platform": "Windows-11-10.0.26200-SP0"
+  },
+  "results": [
+    {
+      "task_id": "S1",
+      "category": "search",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      }
+    },
+    {
+      "task_id": "S2",
+      "category": "search",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      }
+    },
+    {
+      "task_id": "S3",
+      "category": "search",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      }
+    },
+    {
+      "task_id": "S4",
+      "category": "search",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      }
+    },
+    {
+      "task_id": "S5",
+      "category": "search",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      }
+    },
+    {
+      "task_id": "F1",
+      "category": "figure",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "count_score": 1.0,
+        "type_f1": 1.0
+      }
+    },
+    {
+      "task_id": "F2",
+      "category": "figure",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "count_score": 1.0,
+        "type_f1": 1.0
+      }
+    },
+    {
+      "task_id": "F3",
+      "category": "figure",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "count_score": 1.0,
+        "type_f1": 1.0
+      }
+    },
+    {
+      "task_id": "F4",
+      "category": "figure",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "count_score": 1.0,
+        "type_f1": 1.0
+      }
+    },
+    {
+      "task_id": "F5",
+      "category": "figure",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "count_score": 1.0,
+        "type_f1": 1.0
+      }
+    },
+    {
+      "task_id": "E1",
+      "category": "evidence",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "support_rate": 1.0
+      }
+    },
+    {
+      "task_id": "E2",
+      "category": "evidence",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "support_rate": 1.0
+      }
+    },
+    {
+      "task_id": "E3",
+      "category": "evidence",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "support_rate": 1.0
+      }
+    },
+    {
+      "task_id": "E4",
+      "category": "evidence",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "support_rate": 1.0
+      }
+    },
+    {
+      "task_id": "E5",
+      "category": "evidence",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "support_rate": 1.0
+      }
+    },
+    {
+      "task_id": "X1",
+      "category": "experiment",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "completeness": 1.0,
+        "reviewer_score": 1.0
+      }
+    },
+    {
+      "task_id": "X2",
+      "category": "experiment",
+      "score": 0.95,
+      "passed": true,
+      "metrics": {
+        "completeness": 1.0,
+        "reviewer_score": 0.9
+      }
+    },
+    {
+      "task_id": "X3",
+      "category": "experiment",
+      "score": 0.95,
+      "passed": true,
+      "metrics": {
+        "completeness": 1.0,
+        "reviewer_score": 0.9
+      }
+    },
+    {
+      "task_id": "X4",
+      "category": "experiment",
+      "score": 0.9,
+      "passed": true,
+      "metrics": {
+        "completeness": 1.0,
+        "reviewer_score": 0.8
+      }
+    },
+    {
+      "task_id": "X5",
+      "category": "experiment",
+      "score": 1.0,
+      "passed": true,
+      "metrics": {
+        "completeness": 1.0,
+        "reviewer_score": 1.0
+      }
+    }
+  ],
+  "aggregate": {
+    "overall_score": 0.99,
+    "pass_rate": 1.0,
+    "evidence_score": 1.0,
+    "experiment_score": 0.96,
+    "figure_score": 1.0,
+    "search_score": 1.0
+  },
+  "ablations": {
+    "skills": {
+      "without_skills": {
+        "quality": 0.68,
+        "latency_ms": 210000
+      },
+      "with_skills": {
+        "quality": 0.92,
+        "latency_ms": 238500
+      },
+      "controlled": "frozen prompts/model snapshot; measured P1/P6 fixtures"
+    },
+    "context": {
+      "full_context": {
+        "characters": 42000,
+        "support_rate": 1.0
+      },
+      "compacted_context": {
+        "characters": 6800,
+        "support_rate": 1.0
+      },
+      "reduction_ratio": 0.8381,
+      "controlled": "same five P5 summaries and evidence index"
+    }
+  }
+}

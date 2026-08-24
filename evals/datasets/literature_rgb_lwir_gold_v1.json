@@ -1,0 +1,115 @@
+{
+  "dataset_id": "literature-rgb-lwir-gold-v1",
+  "version": 1,
+  "created_at": "2026-08-09",
+  "topic": "RGB-LWIR image registration",
+  "label_definition": {
+    "relevant": "The title and abstract directly study registration, alignment, or feature matching between visible/RGB and LWIR/thermal imagery.",
+    "irrelevant": "The paper is adjacent fusion, detection, sensing, medical, RGB-D, or unrelated registration research."
+  },
+  "required_concept_groups": [
+    ["RGB", "visible"],
+    ["LWIR", "thermal", "infrared"],
+    ["registration", "alignment", "matching"]
+  ],
+  "excluded_topics": ["object detection", "image fusion", "medical thermal", "RGB-D"],
+  "papers": [
+    {
+      "stable_id": "G001",
+      "source_id": "G001",
+      "title": "Deep RGB-LWIR Image Registration with Cross-Modal Attention",
+      "abstract": "A visible and long-wave infrared registration network estimates dense alignment.",
+      "relevant": true,
+      "label_reason": "Direct RGB-LWIR registration method."
+    },
+    {
+      "stable_id": "G002",
+      "source_id": "G002",
+      "title": "Visible and Thermal Image Alignment under Local Deformation",
+      "abstract": "The method aligns visible RGB and thermal LWIR image pairs.",
+      "relevant": true,
+      "label_reason": "Direct visible-thermal alignment method."
+    },
+    {
+      "stable_id": "G003",
+      "source_id": "G003",
+      "title": "Infrared-Visible Cross-Modal Feature Matching",
+      "abstract": "Feature correspondences support registration between RGB and infrared sensors.",
+      "relevant": true,
+      "label_reason": "Direct feature matching for cross-modal registration."
+    },
+    {
+      "stable_id": "G004",
+      "source_id": "G004",
+      "title": "Multimodal Image Registration for Low Altitude Platforms",
+      "abstract": "A survey of visible RGB and LWIR thermal registration for UAV platforms.",
+      "relevant": true,
+      "label_reason": "Directly surveys the target registration setting."
+    },
+    {
+      "stable_id": "G005",
+      "source_id": "G005",
+      "title": "Visible-Infrared Registration for Historical Document Enhancement",
+      "abstract": "An adaptive method registers visible and thermal images before enhancement.",
+      "relevant": true,
+      "label_reason": "Registration is a primary contribution."
+    },
+    {
+      "stable_id": "G006",
+      "source_id": "G006",
+      "title": "Cross-Sensor Alignment of RGB and Long-Wave Infrared Cameras",
+      "abstract": "The paper estimates geometric registration between visible and LWIR cameras.",
+      "relevant": true,
+      "label_reason": "Direct cross-sensor registration."
+    },
+    {
+      "stable_id": "G007",
+      "source_id": "G007",
+      "title": "Visible-Infrared Image Fusion for Object Detection",
+      "abstract": "A thermal and RGB image fusion network improves object detection accuracy.",
+      "relevant": false,
+      "label_reason": "Fusion and detection without registration contribution."
+    },
+    {
+      "stable_id": "G008",
+      "source_id": "G008",
+      "title": "Artificial Intelligence in Medical Thermal Imaging",
+      "abstract": "Infrared sensing supports medical diagnosis from thermal images.",
+      "relevant": false,
+      "label_reason": "Medical sensing, not registration."
+    },
+    {
+      "stable_id": "G009",
+      "source_id": "G009",
+      "title": "Multispectral YOLO Object Detection: A Survey",
+      "abstract": "Visible and infrared imagery are fused for multispectral object detection.",
+      "relevant": false,
+      "label_reason": "Detection survey, not registration."
+    },
+    {
+      "stable_id": "G010",
+      "source_id": "G010",
+      "title": "A Review of Visible and Infrared Image Fusion",
+      "abstract": "The review compares thermal-visible image fusion strategies.",
+      "relevant": false,
+      "label_reason": "Fusion review without registration focus."
+    },
+    {
+      "stable_id": "G011",
+      "source_id": "G011",
+      "title": "RGB-D Point Cloud Registration",
+      "abstract": "RGB and depth camera point clouds are aligned for 3D reconstruction.",
+      "relevant": false,
+      "label_reason": "RGB-D rather than LWIR."
+    },
+    {
+      "stable_id": "G012",
+      "source_id": "G012",
+      "title": "Satellite Image Registration with Feature Descriptors",
+      "abstract": "Optical satellite images are aligned across acquisition dates.",
+      "relevant": false,
+      "label_reason": "No RGB-LWIR cross-modal setting."
+    }
+  ]
+}
+

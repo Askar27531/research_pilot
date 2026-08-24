@@ -1,0 +1,1 @@
+"""ResearchPilot application package."""

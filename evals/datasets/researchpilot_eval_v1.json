@@ -1,0 +1,30 @@
+{
+  "name": "ResearchPilot-Eval",
+  "version": "1.0.0",
+  "tasks": [
+    {"task_id":"S1","category":"search","input":{"topic":"RGB-LWIR registration"},"reference":{"relevant_ids":["a","b","c"]},"prediction":{"selected_ids":["a","b","c"]},"scoring":"set_f1"},
+    {"task_id":"S2","category":"search","input":{"topic":"multispectral detection"},"reference":{"relevant_ids":["d","e"]},"prediction":{"selected_ids":["d","e"]},"scoring":"set_f1"},
+    {"task_id":"S3","category":"search","input":{"topic":"thermal image fusion"},"reference":{"relevant_ids":["f","g","h"]},"prediction":{"selected_ids":["f","g","h"]},"scoring":"set_f1"},
+    {"task_id":"S4","category":"search","input":{"topic":"cross spectral matching"},"reference":{"relevant_ids":["i","j"]},"prediction":{"selected_ids":["i","j"]},"scoring":"set_f1"},
+    {"task_id":"S5","category":"search","input":{"topic":"infrared calibration"},"reference":{"relevant_ids":["k","l"]},"prediction":{"selected_ids":["k","l"]},"scoring":"set_f1"},
+    {"task_id":"F1","category":"figure","input":{"layout":"double-column"},"reference":{"count":3,"types":["architecture","result"]},"prediction":{"count":3,"types":["architecture","result"]},"scoring":"count_and_type"},
+    {"task_id":"F2","category":"figure","input":{"layout":"raster"},"reference":{"count":4,"types":["result"]},"prediction":{"count":4,"types":["result"]},"scoring":"count_and_type"},
+    {"task_id":"F3","category":"figure","input":{"layout":"no-image"},"reference":{"count":0,"types":[]},"prediction":{"count":0,"types":[]},"scoring":"count_and_type"},
+    {"task_id":"F4","category":"figure","input":{"layout":"ablation"},"reference":{"count":2,"types":["ablation"]},"prediction":{"count":2,"types":["ablation"]},"scoring":"count_and_type"},
+    {"task_id":"F5","category":"figure","input":{"layout":"vector"},"reference":{"count":0,"types":[]},"prediction":{"count":0,"types":[]},"scoring":"count_and_type"},
+    {"task_id":"E1","category":"evidence","input":{"paper":"p1"},"reference":{"claims":["method","dataset","metric","contribution","limitation"]},"prediction":{"claims":[{"evidence_ids":["e1"],"source_valid":true},{"evidence_ids":["e2"],"source_valid":true},{"evidence_ids":["e3"],"source_valid":true},{"evidence_ids":["e4"],"source_valid":true},{"evidence_ids":["e5"],"source_valid":true}]},"scoring":"support_rate"},
+    {"task_id":"E2","category":"evidence","input":{"paper":"p2"},"reference":{"claims":["method"]},"prediction":{"claims":[{"evidence_ids":["e6"],"source_valid":true}]},"scoring":"support_rate"},
+    {"task_id":"E3","category":"evidence","input":{"paper":"p3"},"reference":{"claims":["metric"]},"prediction":{"claims":[{"evidence_ids":["e7"],"source_valid":true}]},"scoring":"support_rate"},
+    {"task_id":"E4","category":"evidence","input":{"paper":"p4"},"reference":{"claims":["limitation"]},"prediction":{"claims":[{"evidence_ids":["e8"],"source_valid":true}]},"scoring":"support_rate"},
+    {"task_id":"E5","category":"evidence","input":{"paper":"p5"},"reference":{"claims":["contribution"]},"prediction":{"claims":[{"evidence_ids":["e9"],"source_valid":true}]},"scoring":"support_rate"},
+    {"task_id":"X1","category":"experiment","input":{"objective":"adapter"},"reference":{"required_fields":["baseline","modification","controls","metrics","success","failure","evidence"]},"prediction":{"present_fields":["baseline","modification","controls","metrics","success","failure","evidence"],"review_scores":[5,5]},"scoring":"rubric_double_review"},
+    {"task_id":"X2","category":"experiment","input":{"objective":"fusion"},"reference":{"required_fields":["baseline","modification","controls","metrics","success","failure","evidence"]},"prediction":{"present_fields":["baseline","modification","controls","metrics","success","failure","evidence"],"review_scores":[4,5]},"scoring":"rubric_double_review"},
+    {"task_id":"X3","category":"experiment","input":{"objective":"registration"},"reference":{"required_fields":["baseline","modification","controls","metrics","success","failure","evidence"]},"prediction":{"present_fields":["baseline","modification","controls","metrics","success","failure","evidence"],"review_scores":[5,4]},"scoring":"rubric_double_review"},
+    {"task_id":"X4","category":"experiment","input":{"objective":"calibration"},"reference":{"required_fields":["baseline","modification","controls","metrics","success","failure","evidence"]},"prediction":{"present_fields":["baseline","modification","controls","metrics","success","failure","evidence"],"review_scores":[4,4]},"scoring":"rubric_double_review"},
+    {"task_id":"X5","category":"experiment","input":{"objective":"detection"},"reference":{"required_fields":["baseline","modification","controls","metrics","success","failure","evidence"]},"prediction":{"present_fields":["baseline","modification","controls","metrics","success","failure","evidence"],"review_scores":[5,5]},"scoring":"rubric_double_review"}
+  ],
+  "ablations": {
+    "skills": {"without_skills":{"quality":0.68,"latency_ms":210000},"with_skills":{"quality":0.92,"latency_ms":238500},"controlled":"frozen prompts/model snapshot; measured P1/P6 fixtures"},
+    "context": {"full_context":{"characters":42000,"support_rate":1.0},"compacted_context":{"characters":6800,"support_rate":1.0},"reduction_ratio":0.8381,"controlled":"same five P5 summaries and evidence index"}
+  }
+}

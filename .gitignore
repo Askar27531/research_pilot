@@ -1,0 +1,61 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Virtual environments
+.venv/
+.p9-clean-venv/
+venv/
+env/
+
+# Python bytecode and package output
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+dist/
+build/
+
+# Test, lint, type-check and coverage caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Runtime databases, logs and temporary files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+*.tmp
+*.temp
+*.bak
+
+# Runtime workspaces and downloaded/generated data
+workspace/
+data/
+
+# IDE and operating-system metadata
+.idea/
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Notebook checkpoints
+.ipynb_checkpoints/

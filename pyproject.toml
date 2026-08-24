@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "research-pilot"
+version = "0.1.0"
+description = "Skill-driven multimodal deep research agent"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.116,<1",
+    "fastmcp>=3.4,<4",
+    "httpx>=0.28,<1",
+    "langgraph>=0.6,<2",
+    "langgraph-checkpoint-sqlite>=3.1,<4",
+    "aiosqlite>=0.22,<1",
+    "pydantic>=2.11,<3",
+    "pydantic-settings>=2.10,<3",
+    "python-dotenv>=1.1,<2",
+    "python-multipart>=0.0.20,<1",
+    "pymupdf>=1.26,<2",
+    "streamlit>=1.48,<2",
+    "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4,<9",
+    "pytest-asyncio>=1.1,<2",
+    "httpx2>=2.9,<3",
+    "ruff>=0.12,<1",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = [".venv", ".p9-clean-venv"]

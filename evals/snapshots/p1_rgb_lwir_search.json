@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "run_type": "p1_live_smoke",
+  "request_id": "p1-live-smoke",
+  "project_id": "21c79e0f-f253-457c-842e-221f4399442b",
+  "request": {
+    "research_question": "Research 2024-2026 RGB-LWIR image registration methods",
+    "keywords": ["RGB-LWIR", "image registration"],
+    "year_from": 2024,
+    "year_to": 2026,
+    "maximum_papers": 5
+  },
+  "queries": [
+    "RGB-LWIR image alignment techniques 2024-2026",
+    "Recent advances in cross-modal image registration using RGB and LWIR data (2024-2026)",
+    "Deep learning approaches for RGB-LWIR image registration in computer vision (2024-2026)",
+    "Applications of RGB-LWIR image registration in surveillance and robotics (2024-2026)",
+    "Evaluation metrics for RGB-LWIR image registration methods (2024-2026)"
+  ],
+  "metrics": {
+    "raw_candidate_count": 46,
+    "unique_candidate_count": 19,
+    "selected_count": 5,
+    "duplicate_count": 27,
+    "warning_count": 0,
+    "end_to_end_seconds": 286.3
+  },
+  "selected_papers": [
+    {
+      "rank": 1,
+      "source_id": "W7160091286",
+      "year": 2026,
+      "final_score": 0.6025,
+      "title": "A Cost-Effective and Rapidly Manufacturable Infrared–Visible High-Contrast Calibration Board Based on Structural Parametrization"
+    },
+    {
+      "rank": 2,
+      "source_id": "W7160458278",
+      "year": 2026,
+      "final_score": 0.5175,
+      "title": "SpectraDINO: Bridging the Spectral Gap in Vision Foundation Models via Lightweight Adapters"
+    },
+    {
+      "rank": 3,
+      "source_id": "W7165912576",
+      "year": 2026,
+      "final_score": 0.435,
+      "title": "Enhancing Perception Through Context-Adaptive Visible and SWIR Image Fusion in Harsh Environments"
+    },
+    {
+      "rank": 4,
+      "source_id": "W4403713534",
+      "year": 2024,
+      "final_score": 0.43,
+      "title": "Surveying You Only Look Once (YOLO) Multispectral Object Detection Advancements, Applications And Challenges"
+    },
+    {
+      "rank": 5,
+      "source_id": "W7167488694",
+      "year": 2026,
+      "final_score": 0.4025,
+      "title": "Visible–Infrared Image Fusion for Computer Vision: A Review of Datasets and Fusion Strategies in Object Detection and Facial-Expression Recognition"
+    }
+  ],
+  "warnings": [],
+  "notes": [
+    "OpenAlex accepted this smoke request without an API key in the current environment.",
+    "The ranking result is a functional baseline, not a relevance-quality gold standard.",
+    "Most latency came from two local Qwen3 14B ranking batches."
+  ]
+}
+

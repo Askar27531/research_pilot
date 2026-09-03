@@ -128,7 +128,9 @@ class ResearchWorkflowService:
                     })
                     break
                 except Exception as exc:  # noqa: BLE001 - upload is the explicit fallback
-                    failures.append(f"{candidate}: {str(exc)[:300]}")
+                    failures.append(
+                        f"{candidate}: {type(exc).__name__}: {str(exc)[:300]}"
+                    )
                     acquisition = acquisition.model_copy(update={
                         "status": "awaiting_upload",
                         "error": "；".join(failures)[:1_000] if failures else discovery_error,

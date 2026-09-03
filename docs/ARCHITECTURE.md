@@ -26,9 +26,9 @@ flowchart LR
 
 ## HTTP 边界
 
-Streamlit 只依赖以下 6 种路径：`/health`、`/projects`、`/projects/{id}/workspace`、`/projects/{id}/actions`、`/projects/{id}/documents` 和 `/projects/{id}/resources/{token}`。项目集合路径同时提供 GET 与 POST，因此共 7 个操作。
+Streamlit 只依赖以下 7 种路径（9 个操作）：`/health`、`/projects`（GET/POST）、`/projects/{id}`（PATCH/DELETE）、`/projects/{id}/workspace`、`/projects/{id}/actions`、`/projects/{id}/documents` 和 `/projects/{id}/resources/{token}`。API 另暴露 `GET /mcp/status` 作为第 8 种路径（第 10 个操作），供 MCP 能力注册与健康诊断，工作台不使用。
 
-统一 workspace 是轻量读模型；传入不透明论文令牌时才附加论文摘要、Figure Cards、Structured Tables 与轻量证据。所有状态变更进入统一 actions 接口。PDF、证据、裁剪和产物都使用项目绑定令牌，浏览器不拼接内部 ID。
+统一 workspace 是轻量读模型；传入不透明论文令牌时才附加论文摘要、Figure Cards、Structured Tables 与轻量证据。项目状态的推进统一进入 actions 接口（课题资料编辑除外，走 `PATCH /projects/{id}`，仅保存输入、取消当前任务）。PDF、证据、裁剪和产物都使用项目绑定令牌，浏览器不拼接内部 ID。
 
 ## 内部职责
 
@@ -47,4 +47,4 @@ PDF 路径始终限制在项目工作区内，资源读取会重新验证项目�
 
 ## 产品边界
 
-ResearchPilot 当前止于所选论文的证据化综合分析，不生成研究方向或实验计划，也不运行实验、不生成训练代码、不调度 GPU。SQLite 面向单机部署；当前仅支持学术 PDF。
+ResearchPilot 生成证据支持的研究方向建议与实验方案供用户审批，并在确认后产出研究材料；它不执行实验、不生成训练代码、不调度 GPU。SQLite 面向单机部署；当前仅支持学术 PDF。系统不会自动宣称研究方向具有创新性，只呈现证据、差异、冲突和风险。

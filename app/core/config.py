@@ -16,13 +16,13 @@ class Settings(BaseSettings):
     ollama_vision_model: str = ""
     ollama_vision_timeout_seconds: float = Field(default=300, gt=0)
     ollama_structured_max_attempts: int = Field(default=2, ge=1, le=5)
-    ollama_num_ctx: int = Field(default=8192, ge=2048, le=32768)
+    ollama_num_ctx: int = Field(default=16384, ge=2048, le=32768)
     ollama_num_predict: int = Field(default=1536, ge=128, le=8192)
     ollama_vision_num_ctx: int = Field(default=8192, ge=2048, le=32768)
     ollama_vision_num_predict: int = Field(default=512, ge=64, le=4096)
     visual_analysis_concurrency: int = Field(default=2, ge=1, le=4)
     paper_analysis_concurrency: int = Field(default=2, ge=1, le=2)
-    paper_analysis_section_tokens: int = Field(default=1024, ge=512, le=2048)
+    paper_analysis_section_tokens: int = Field(default=4096, ge=512, le=4096)
     paper_analysis_experiment_tokens: int = Field(default=1536, ge=768, le=2048)
     paper_analysis_overview_tokens: int = Field(default=768, ge=384, le=1536)
     ocr_languages: str = "eng"

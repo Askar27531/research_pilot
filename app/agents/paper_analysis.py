@@ -114,7 +114,12 @@ SPECIALISTS = (
         ("方法", "算法", "模型", "流程", "公式", "步骤", "框架", "method", "algorithm",
          "model", "framework", "equation", "architecture", "processing"),
         8, 3,
-        "按输入、处理步骤、关键组件、输出和因果机制讲清方法；解释每一步为什么能产生目标结果。",
+        "讲清方法本身与作用机制：输入形式、主要处理步骤与关键组件、输出，以及机制为何能产生"
+        "目标结果。每一条 value 必须是一句完整的具体论述（建议 2 个完整句子以上）；严禁把"
+        "『输入』『处理步骤』『关键组件』『输出』『因果机制』这类分类词单独当作条目内容。"
+        "methods 描述方法如何构成与运作，mechanisms 描述其有效的因果原理，两者内容不得相同。"
+        "若论文明确阐述了机制（如某一步骤为何有效），mechanisms 应使用 kind=supported 并引用"
+        "对应证据；只有超出论文论述的推断才使用 inference。",
     ),
     _SpecialistSpec(
         "experiment", "实验设置与结果", ("experimental_setup", "main_results"),
@@ -130,7 +135,9 @@ SPECIALISTS = (
         ("讨论", "结论", "局限", "不足", "未来", "适用", "discussion", "conclusion",
          "limitation", "future", "applicable", "uncertainty"),
         7, 2,
-        "区分作者明确承认的局限与基于证据的审慎推断，并说明适用范围、前提和潜在失败情形。",
+        "区分作者明确承认的局限与基于证据的审慎推断，并说明适用范围、前提和潜在失败情形。"
+        "每一条 value 必须写明具体的局限或适用条件；严禁把『作者明确承认的局限』"
+        "『基于证据的审慎推断』等类别短语当作条目内容。",
     ),
 )
 
@@ -297,14 +304,22 @@ class PaperAnalyst:
                 output_tokens,
             )
         self._sanitize_evidence(result, allowed)
-        if self._fields_need_repair(result, spec.fields):
+        repair_round = 0
+        while self._fields_need_repair(result, spec.fields) and repair_round < 2:
+            repair_round += 1
+            guidance = (
+                "上一次结果过短或缺少有证据支持的解释，且条目里出现的是分类标签而不是具体内容。"
+                "请只重写该结构：每个栏目至少 2 条，每条 value 必须是一段不少于 30 字的具体论述，"
+                "说明论文做了什么、如何实现、为什么，禁止把栏目名或分类词单独作为条目内容。"
+                if repair_round == 1 else
+                f"第二次修复（栏目：{'、'.join(spec.fields)}）仍不合格。请彻底重写：每条 value "
+                "扩写到 50 字以上并包含具体细节（方法组件名称、机制因果或局限情形），"
+                "不得保留标签式短句，也不得复述上一轮内容。"
+            )
             repair_messages = [
                 *messages,
                 {"role": "assistant", "content": result.model_dump_json()},
-                {"role": "user", "content": (
-                    "上一次结果过短或缺少有证据支持的解释。请仅重写该结构：每个栏目至少 2 条，"
-                    "每条至少 2 个完整句子，并补足方法原因、实验细节或适用边界。"
-                )},
+                {"role": "user", "content": guidance},
             ]
             async with semaphore:
                 result = await self._checkpointed_call(
@@ -448,9 +463,17 @@ class PaperAnalyst:
     def _fields_need_repair(value: BaseModel, fields: tuple[str, ...]) -> bool:
         for field in fields:
             claims = getattr(value, field, [])
-            if len(claims) < 2 or sum(len(claim.value.strip()) for claim in claims) < 100:
+            chars = sum(len(claim.value.strip()) for claim in claims)
+            sufficient = (len(claims) >= 2 and chars >= 100) or (
+                len(claims) >= 1 and chars >= 300
+            )
+            if not sufficient:
                 return True
-            if field != "limitations" and not any(claim.kind == "supported" for claim in claims):
+            # mechanisms (causal interpretation) and limitations (judgment) may
+            # legitimately be inference-only; factual sections need >=1 supported.
+            if field not in {"mechanisms", "limitations"} and not any(
+                claim.kind == "supported" for claim in claims
+            ):
                 return True
         return False
 

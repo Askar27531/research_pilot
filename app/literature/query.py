@@ -34,22 +34,47 @@ async def generate_search_queries(
 
 
 def _deduplicate_query_plan(plan: SearchQueryPlan) -> SearchQueryPlan:
+    """Keep complementary queries while preferring those covering all groups.
+
+    Concept filtering is recall-first (any matched group keeps a paper), so the
+    plan should keep broad/partial-coverage queries as well. Queries that cover
+    every required group are kept first; remaining complementary queries fill up
+    to five slots. Near-duplicate wording is dropped regardless of coverage.
+    """
     unique: list[SearchQuery] = []
     seen: set[str] = set()
     groups = _normalize_groups(plan.required_concept_groups)
     if not groups:
         raise ValueError("model did not return required concept groups")
-    for item in plan.queries:
+
+    def searchable(item: SearchQuery) -> str:
         normalized = " ".join(item.query.casefold().split())
-        searchable = f"{normalized} {' '.join(item.concepts).casefold()}"
-        covers_all = all(
-            any(_contains(searchable, term.casefold()) for term in group) for group in groups
+        return f"{normalized} {' '.join(item.concepts).casefold()}"
+
+    def covers_all(item: SearchQuery) -> bool:
+        return all(
+            any(_contains(searchable(item), term.casefold()) for term in group)
+            for group in groups
         )
-        if normalized not in seen and covers_all:
-            seen.add(normalized)
-            unique.append(item)
+
+    def covers_any(item: SearchQuery) -> bool:
+        return any(
+            any(_contains(searchable(item), term.casefold()) for term in group)
+            for group in groups
+        )
+
+    # Strong (all-groups) queries first, then broader recall-oriented ones.
+    ordered = sorted(plan.queries, key=lambda item: not covers_all(item))
+    for item in ordered:
+        normalized = " ".join(item.query.casefold().split())
+        if normalized in seen or not covers_any(item):
+            continue
+        seen.add(normalized)
+        unique.append(item)
+        if len(unique) >= 5:
+            break
     if len(unique) < 3:
-        raise ValueError("fewer than 3 distinct queries cover every required concept group")
+        raise ValueError("fewer than 3 distinct queries match any required concept group")
     return SearchQueryPlan(
         topic=plan.topic,
         required_concept_groups=groups,

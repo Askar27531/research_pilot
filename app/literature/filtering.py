@@ -16,7 +16,12 @@ def filter_by_required_concepts(
     required_groups: list[list[str]],
     excluded_topics: list[str],
 ) -> ConceptFilterResult:
-    """Require one match per concept group and reject explicit excluded topics."""
+    """Recall-first concept filter: keep any paper matching at least one group.
+
+    Rejecting papers that hit none of the requested concept groups only removes
+    obviously off-topic hits; precise relevance is decided by LLM screening.
+    Papers matching an excluded topic are still dropped deterministically.
+    """
 
     groups = [[_normalize(term) for term in group if _normalize(term)] for group in required_groups]
     groups = [group for group in groups if group]
@@ -27,14 +32,17 @@ def filter_by_required_concepts(
 
     for paper in papers:
         searchable = _normalize(f"{paper.title} {paper.abstract or ''}")
-        matched = [
-            next((term for term in group if _contains(searchable, term)), "") for group in groups
+        matched_terms = [
+            term
+            for group in groups
+            for term in group
+            if _contains(searchable, term)
         ]
-        has_all_required = not groups or all(matched)
+        has_required = not groups or bool(matched_terms)
         has_excluded = any(_contains(searchable, term) for term in excluded_terms)
-        if has_all_required and not has_excluded:
+        if has_required and not has_excluded:
             included.append(paper)
-            matches[paper.stable_id] = matched
+            matches[paper.stable_id] = matched_terms
         else:
             excluded.append(paper)
     return ConceptFilterResult(included, excluded, matches)

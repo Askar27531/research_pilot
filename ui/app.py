@@ -59,7 +59,9 @@ def text_lines(value: str) -> list[str]:
 def step_header(stage: str, project_id: str | None = None) -> int:
     active = {"setup": 1, "searching": 2, "paper_selection": 3,
               "acquiring_selected": 4, "documents_needed": 4,
-              "analyzing_selected": 4, "analysis_review": 4, "failed": 4}.get(stage, 1)
+              "analyzing_selected": 4, "analysis_review": 4,
+              "direction_review": 4, "researching": 4, "experiment_review": 4,
+              "failed": 4}.get(stage, 1)
     labels = ("描述课题", "检索文献", "选择论文", "证据化分析")
     state_key = f"workflow-view-{project_id}" if project_id else None
     if state_key:

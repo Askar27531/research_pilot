@@ -13,7 +13,8 @@ class ProjectSummary(BaseModel):
     name: str
     user_stage: Literal[
         "setup", "searching", "paper_selection", "acquiring_selected",
-        "documents_needed", "analyzing_selected", "analysis_review", "failed",
+        "documents_needed", "analyzing_selected", "analysis_review",
+        "direction_review", "researching", "experiment_review", "failed",
     ]
     status_label: str
     updated_at: datetime
@@ -83,7 +84,8 @@ class ProjectWorkspace(BaseModel):
     name: str
     user_stage: Literal[
         "setup", "searching", "paper_selection", "acquiring_selected",
-        "documents_needed", "analyzing_selected", "analysis_review", "failed",
+        "documents_needed", "analyzing_selected", "analysis_review",
+        "direction_review", "researching", "experiment_review", "failed",
     ]
     status_label: str
     status_detail: str

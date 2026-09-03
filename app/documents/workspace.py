@@ -30,6 +30,15 @@ class WorkspaceManager:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def delete_project(self, project_id: str) -> None:
+        """Remove one validated project directory without creating it first."""
+        if not SAFE_ID.fullmatch(project_id):
+            raise DocumentSecurityError("Invalid project identifier")
+        path = (self.root / project_id).resolve()
+        self._ensure_within(path, self.root)
+        if path.is_dir():
+            shutil.rmtree(path)
+
     def resolve_safe_path(self, project_id: str, relative_path: str) -> Path:
         candidate = Path(relative_path)
         if candidate.is_absolute() or ".." in candidate.parts:

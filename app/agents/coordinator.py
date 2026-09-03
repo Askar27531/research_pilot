@@ -1,5 +1,4 @@
 from app.agents.literature import LiteratureResearcher
-from app.agents.specialists import MultimodalAnalyst, ResearchBuilder
 from app.db import TraceRepository
 from app.schemas import AgentResult, AgentTask, Handoff
 
@@ -11,12 +10,8 @@ class Coordinator:
         self,
         literature_researcher: LiteratureResearcher,
         traces: TraceRepository,
-        multimodal_analyst: MultimodalAnalyst | None = None,
-        research_builder: ResearchBuilder | None = None,
     ) -> None:
         self.literature_researcher = literature_researcher
-        self.multimodal_analyst = multimodal_analyst or MultimodalAnalyst()
-        self.research_builder = research_builder or ResearchBuilder()
         self.traces = traces
 
     async def run(self, task: AgentTask, trace_id: str) -> AgentResult:
@@ -28,16 +23,11 @@ class Coordinator:
             agent="coordinator",
             summary={"task_id": task.task_id, "task_type": task.task_type},
         )
-        target = {
-            "literature_search": "literature_researcher",
-            "multimodal_analysis": "multimodal_analyst",
-            "research_build": "research_builder",
-        }[task.task_type]
         handoff = Handoff(
             task_id=task.task_id,
             project_id=task.project_id,
             source_agent="coordinator",
-            target_agent=target,
+            target_agent="literature_researcher",
             objective=task.objective,
             context_summary={
                 "has_request": "request" in task.context,
@@ -52,12 +42,7 @@ class Coordinator:
             agent="coordinator",
             summary=handoff.model_dump(mode="json"),
         )
-        if target == "literature_researcher":
-            result = await self.literature_researcher.run(task, handoff, trace_id)
-        elif target == "multimodal_analyst":
-            result = await self.multimodal_analyst.run(task)
-        else:
-            result = await self.research_builder.run(task)
+        result = await self.literature_researcher.run(task, handoff, trace_id)
         await self.traces.append(
             task.project_id,
             trace_id,

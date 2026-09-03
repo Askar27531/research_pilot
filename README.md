@@ -1,15 +1,30 @@
 # ResearchPilot
 
-ResearchPilot is a local-first, skill-driven multimodal research agent. P0-P9 form a complete loop: literature search, PDF workspace, evidence-backed synthesis, human-reviewed experiment design, versioned artifacts, recovery/trace, and reproducible release evaluation.
+ResearchPilot 是一个本地优先、证据可追溯的多模态论文研究助手。它先生成并展示检索策略，由用户选择一至两篇论文后，再阅读 PDF 正文与图表并生成证据化综合分析。
 
-## Requirements
+## 用户流程
 
-- Windows PowerShell
-- Python 3.12
-- Ollama
-- A local model; development currently uses `qwen3:14b`
+Streamlit 工作台分为四步：
 
-## Setup
+1. 描述课题：填写研究问题、当前方案、主要困难和目标指标。
+2. 检索文献：大模型理解课题并生成检索词和策略，MCP 从 OpenAlex、Crossref 和 arXiv 检索。
+3. 选择论文：查看检索策略、摘要和相关性说明，选择一至两篇并补充分析要求。
+4. 证据化分析：自动获取所选全文，失败时上传 PDF；查看逐篇分析、图表证据和双篇比较。
+
+未确认论文前不会下载或分析全文。Project ID、Paper ID、revision、resume、Trace 和 JSON 均不会出现在普通用户流程中。
+
+## 技术能力
+
+- OpenAlex、Crossref、arXiv 多来源并发检索、规范化、去重和部分失败容错。
+- PyMuPDF 原生文本、按需 OCR、位图/矢量区域、表格和稳定裁剪提取。
+- Ollama 本地视觉模型分析架构图、结果图、消融图和扫描页面，响应经 Pydantic Schema 校验。
+- 文本、视觉和表格证据保留页码、区域、原文/裁剪与 SHA-256 来源哈希。
+- SQLite 持久化后台任务、LangGraph checkpoint 和项目级并发控制，服务重启后可恢复。
+- 最终生成逐篇证据化分析，以及选择两篇时的共同点、差异、互补性和适用条件。
+
+## 安装与配置
+
+要求 Python 3.12、Ollama，以及一个文本模型和支持视觉输入的本地模型。
 
 ```powershell
 cd D:\Agent\research-pilot
@@ -20,142 +35,88 @@ python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 ```
 
-Set the exact model tag shown by `ollama list`:
-
-```env
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=qwen3:14b
-OLLAMA_TIMEOUT_SECONDS=300
-```
-
-Start Ollama if it is not already running, then confirm its API is available:
+在 `.env` 中填写 `OLLAMA_MODEL` 和 `OLLAMA_VISION_MODEL`，模型名必须与 `ollama list` 完全一致。ResearchPilot 不会自动下载模型，也不会在视觉模型不可用时静默降级。
 
 ```powershell
 ollama list
 Invoke-RestMethod http://localhost:11434/api/tags
 ```
 
-## Run the API
+## 启动
+
+先启动 API：
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-OpenAPI documentation is available at <http://127.0.0.1:8000/docs>.
+再启动工作台：
 
-Health check:
+```powershell
+streamlit run ui/app.py
+```
+
+浏览器打开 <http://localhost:8501>。API 文档位于 <http://127.0.0.1:8000/docs>，健康与模型预检可通过以下命令查看：
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/health
 ```
 
-Model check:
+## 核心 REST API
 
-```powershell
-$body = @{ prompt = "Confirm model connectivity" } | ConvertTo-Json
-Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8000/models/test `
-  -ContentType application/json `
-  -Body $body
-```
+面向工作台只保留 6 种路径、7 个操作：
 
-Minimal research Graph:
+| 方法与路径 | 用途 |
+|---|---|
+| `GET /health` | 服务、数据库、文本模型、视觉模型和 OCR 预检 |
+| `GET /projects` | 项目列表 |
+| `POST /projects` | 创建项目、保存研究资料并提交首次任务 |
+| `GET /projects/{id}/workspace` | 获取统一工作台读模型，可用 `paper` 参数按需读取论文详情 |
+| `POST /projects/{id}/actions` | 运行、重试、审批、调整预览/应用和证据复核 |
+| `POST /projects/{id}/documents` | 使用工作台提供的上传令牌提交 PDF，并自动继续分析 |
+| `GET /projects/{id}/resources/{token}` | 读取证据、图表裁剪或下载产物 |
+
+旧的细分 REST 路由已删除，不提供兼容代理。内部 Repository、Service、Worker 和 MCP 工具仍按职责拆分。
+
+创建项目示例：
 
 ```powershell
 $body = @{
-  research_question = "调研 2024-2026 年 RGB-LWIR image registration"
-  keywords = @("RGB-LWIR", "registration")
-  year_from = 2024
-  year_to = 2026
-  maximum_papers = 15
-} | ConvertTo-Json
+  research_question = "多模态模型如何提高学术图表理解的可靠性？"
+  current_approach = "基于文本抽取的文献综述"
+  difficulties = @("图表证据难以追溯")
+  target_metrics = @("证据定位准确率")
+  advanced = @{
+    year_from = 2022
+    year_to = 2026
+    max_papers = 20
+    sources = @("openalex", "crossref", "arxiv")
+  }
+} | ConvertTo-Json -Depth 5
 
 Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8000/research/test `
-  -ContentType application/json `
-  -Body $body
-```
-
-Literature search workflow:
-
-```powershell
-Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8000/research/search `
-  -ContentType application/json `
-  -Body $body
-```
-
-This endpoint runs request understanding, generation of 3–5 search queries, Literature MCP calls to OpenAlex, DOI/OpenAlex-ID deduplication, lexical ranking, Qwen relevance ranking, and final paper selection. Current OpenAlex documentation requires a free API key; set `OPENALEX_API_KEY` in `.env`. Check configuration with `GET /health/dependencies`.
-
-Run the literature relevance Gold Set:
-
-```powershell
-python -m evals.run_literature_eval
-```
-
-Run the UTF-8 Chinese request smoke test:
-
-```powershell
-python -m scripts.smoke_chinese_request
-```
-
-Every response includes `X-Request-ID`. Validation and provider failures use a common error shape with `code`, `message`, `retryable`, and `request_id`.
-
-Persistent project workflow:
-
-```powershell
-$project = Invoke-RestMethod -Method Post `
   -Uri http://127.0.0.1:8000/projects `
   -ContentType application/json `
-  -Body (@{ name = "Registration review"; request = $body } | ConvertTo-Json -Depth 5)
-
-Invoke-RestMethod -Method Post `
-  -Uri "http://127.0.0.1:8000/projects/$($project.id)/research" `
-  -ContentType application/json `
-  -Body (@{ run_id = "demo-run-1" } | ConvertTo-Json)
+  -Body $body
 ```
 
-Projects, selected papers, execution traces, and LangGraph checkpoints are stored in `DATABASE_PATH`. Use `GET /projects/{id}`, `/papers`, and `/trace` to inspect them; list endpoints accept `limit` and `offset`. A failed workflow is continued with `POST /projects/{id}/resume`. Reusing a completed `run_id` is idempotent.
-
-Project research is orchestrated through a structured Coordinator → Literature Researcher handoff. The researcher loads `systematic-search` only when generating queries and `paper-screening` only when ranking candidates. Skill files are restricted to `SKILLS_ROOT`, size-limited by `SKILL_MAX_BYTES`, cached after first use, and never selected through an arbitrary filesystem path. The project trace exposes `agent_plan`, `agent_handoff`, `skill_load`, `tool_call`, and `agent_return` without storing complete prompts.
-
-PDFs are imported through `WorkspaceManager`, then parsed through the Document MCP. The five tools are `parse_document`, `get_page`, `get_document_structure`, `extract_figures`, and `get_figure`. Artifacts stay below `WORKSPACE_ROOT/{project_id}` and API/MCP models expose only project-relative paths. P4 validation results and current OCR/vector limitations are recorded in [docs/P4_VALIDATION.md](docs/P4_VALIDATION.md).
-
-Evidence is project/paper/document scoped. Upload a PDF with `POST /projects/{project_id}/documents/import`, create text, figure, or table evidence under `/evidence`, save evidence-backed summaries with `PUT /summaries/{paper_id}`, and retrieve the cross-paper matrix from `GET /comparison`. `GET /evidence/{id}/source` revalidates the stored locator and hash before returning a source preview. P5 integrity metrics are recorded in [docs/P5_VALIDATION.md](docs/P5_VALIDATION.md).
-
-Evidence-grounded experiment proposals are created with `POST /projects/{project_id}/experiment-proposal`. The graph checkpoints at `human_approval`; submit an `accept`, restricted `modify`, or `reject` decision to `/experiment-proposal/decision` with the current proposal version. The same approval resumes after a process restart through SQLite Checkpointer. Local Qwen proposal generation can take about four minutes, so the default Ollama timeout is 300 seconds. See [docs/P6_VALIDATION.md](docs/P6_VALIDATION.md).
-
-Generate versioned Markdown, CSV, and Mermaid outputs under `/projects/{project_id}/artifacts`; every download is SHA-256 verified. Start the UI with `streamlit run ui/app.py`. It provides research creation, progress/trace, Evidence, experiment approval, and Artifact preview/download without direct database access. See [docs/P7_VALIDATION.md](docs/P7_VALIDATION.md).
-
-Long-running literature work persists each query item independently. Resume skips completed items and retries only failed work. Inspect `/projects/{id}/progress`, `/progress/metrics`, `/trace`, and `/trace/metrics`; Trace supports event type and success filters. The same `X-Request-ID` crosses API, Graph metadata, MCP, and OpenAlex boundaries. Reliability and security results are in [docs/P8_VALIDATION.md](docs/P8_VALIDATION.md).
-
-## Quality checks
+## 质量检查
 
 ```powershell
-python -m pytest -q
-python -m ruff check .
+python -m pytest
+python -m ruff check app mcp_servers ui tests
 python -m pip check
 ```
 
-Release evaluation and fixed offline demo:
+运行在线演示前需启动 API、Ollama，并配置文献服务：
 
 ```powershell
-python -m evals.run_researchpilot_eval
 python -m scripts.run_fixed_demo
 ```
 
-The 20-item suite is a frozen deterministic regression snapshot, not a fresh online model benchmark. See [P9 release validation](docs/P9_RELEASE_VALIDATION.md) for interpretation and clean-install evidence, and [architecture](docs/ARCHITECTURE.md) for component boundaries.
+详细边界见 [架构说明](docs/ARCHITECTURE.md)。历史阶段验证文档保留用于追踪演进，但其中旧路由示例不再是当前接口。
 
-## Troubleshooting
+## 当前边界
 
-- `MODEL_UNAVAILABLE`: check that Ollama is running, the configured model exists, and `OLLAMA_BASE_URL` is reachable.
-- Model not found: copy the exact name from `ollama list` into `.env`.
-- Timeout during the first call: model loading may take longer; increase `OLLAMA_TIMEOUT_SECONDS` if necessary.
-- PowerShell blocks activation: run `Set-ExecutionPolicy -Scope Process Bypass`, then activate the environment again.
-
-## Current scope
-
-P0 through P9 are implemented. The detailed implementation sequence is in [docs/DEVELOPMENT_ROADMAP.md](docs/DEVELOPMENT_ROADMAP.md).
-
-Known unresolved problems and their closing criteria are tracked in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
+仅深入支持学术 PDF；不支持 DOCX、PPTX、XLSX 或独立图片。本轮不实现引用网络、PRISMA、系统综述协议、实验执行、训练代码生成、GPU 管理或 MLOps。系统不会自动宣称研究方向具有创新性，只呈现证据、差异、冲突和风险。

@@ -61,6 +61,16 @@ class DocumentRepository:
             created_at=row["created_at"],
         )
 
+    async def get_for_paper(self, project_id: str, paper_id: str) -> LinkedDocument:
+        async with self.database.connect() as connection:
+            row = await (await connection.execute(
+                "SELECT id FROM documents WHERE project_id=? AND paper_id=?",
+                (project_id, paper_id),
+            )).fetchone()
+        if row is None:
+            raise RecordNotFoundError("Document not linked for selected paper")
+        return await self.get(project_id, row["id"])
+
 
 class EvidenceRepository:
     def __init__(self, database: Database) -> None:
@@ -143,6 +153,15 @@ class EvidenceRepository:
                 )
             ).fetchall()
         return [EvidenceNode.model_validate_json(row["payload_json"]) for row in rows]
+
+    async def excluded_ids(self, project_id: str) -> set[str]:
+        async with self.database.connect() as connection:
+            rows = await (await connection.execute(
+                "SELECT evidence_id FROM evidence_reviews "
+                "WHERE project_id=? AND status='excluded'",
+                (project_id,),
+            )).fetchall()
+        return {row["evidence_id"] for row in rows}
 
     async def delete(self, project_id: str, evidence_id: str) -> None:
         try:

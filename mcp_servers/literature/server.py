@@ -3,29 +3,39 @@ from contextlib import asynccontextmanager
 
 from fastmcp import Context, FastMCP
 
-from app.literature import OpenAlexClient
+from app.literature import (
+    ArxivProvider,
+    CrossrefProvider,
+    MultiSourceLiteratureProvider,
+    OpenAlexClient,
+)
 from app.schemas import PaperMetadata, SearchResult
 
 
 def create_literature_server(
-    client: OpenAlexClient | None = None,
-    client_factory: Callable[[], OpenAlexClient] = OpenAlexClient,
+    client: object | None = None,
+    client_factory: Callable[[], object] | None = None,
+    auth: object | None = None,
 ) -> FastMCP:
     """Create a server whose owned OpenAlex client follows server lifespan."""
 
     @asynccontextmanager
-    async def server_lifespan(_: FastMCP) -> AsyncIterator[dict[str, OpenAlexClient]]:
-        openalex = client or client_factory()
+    async def server_lifespan(_: FastMCP) -> AsyncIterator[dict[str, object]]:
+        literature = client or (client_factory() if client_factory else MultiSourceLiteratureProvider({
+            "openalex": OpenAlexClient(), "crossref": CrossrefProvider(), "arxiv": ArxivProvider(),
+        }))
         try:
-            yield {"openalex": openalex}
+            yield {"literature": literature}
         finally:
             if client is None:
-                await openalex.close()
+                await literature.close()  # type: ignore[attr-defined]
 
     server = FastMCP(
         "ResearchPilot Literature",
         instructions="Search and retrieve normalized scholarly paper metadata.",
         lifespan=server_lifespan,
+        auth=auth,
+        version="0.1.0",
     )
 
     @server.tool
@@ -35,16 +45,18 @@ def create_literature_server(
         year_to: int | None = None,
         limit: int = 20,
         trace_id: str | None = None,
+        sources: list[str] | None = None,
         ctx: Context | None = None,
     ) -> SearchResult:
         """Search OpenAlex for scholarly papers within an optional year range."""
 
         if ctx is None:
             raise RuntimeError("FastMCP context is unavailable")
-        openalex = ctx.lifespan_context["openalex"]
-        return await openalex.search_papers(
-            query, year_from, year_to, limit, trace_id=trace_id
-        )
+        literature = ctx.lifespan_context["literature"]
+        if isinstance(literature, MultiSourceLiteratureProvider):
+            return await literature.search_papers(query, year_from, year_to, limit, sources)
+        return await literature.search_papers(  # type: ignore[attr-defined]
+            query, year_from, year_to, limit, trace_id=trace_id)
 
     @server.tool
     async def get_paper_metadata(
@@ -54,8 +66,12 @@ def create_literature_server(
 
         if ctx is None:
             raise RuntimeError("FastMCP context is unavailable")
-        openalex = ctx.lifespan_context["openalex"]
-        return await openalex.get_paper_metadata(identifier)
+        literature = ctx.lifespan_context["literature"]
+        if isinstance(literature, MultiSourceLiteratureProvider):
+            # DOI lookup remains authoritative through OpenAlex; search falls back to all sources.
+            openalex = literature.providers["openalex"]
+            return await openalex.get_paper_metadata(identifier)  # type: ignore[attr-defined]
+        return await literature.get_paper_metadata(identifier)  # type: ignore[attr-defined]
 
     return server
 

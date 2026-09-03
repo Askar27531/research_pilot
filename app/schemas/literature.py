@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
@@ -19,7 +19,11 @@ class PaperMetadata(BaseModel):
     venue: str | None = None
     citation_count: int = Field(default=0, ge=0)
     open_access_url: HttpUrl | None = None
-    source: Literal["openalex"] = "openalex"
+    arxiv_id: str | None = None
+    openalex_id: str | None = None
+    source: Literal["openalex", "crossref", "arxiv"] = "openalex"
+    sources: list[Literal["openalex", "crossref", "arxiv"]] = Field(default_factory=list)
+    source_records: list[dict[str, Any]] = Field(default_factory=list)
     source_queries: list[str] = Field(default_factory=list)
 
     @field_validator("doi")
@@ -45,6 +49,9 @@ class SearchPapersInput(BaseModel):
     year_from: int | None = Field(default=None, ge=1400, le=2100)
     year_to: int | None = Field(default=None, ge=1400, le=2100)
     limit: int = Field(default=20, ge=1, le=100)
+    sources: list[Literal["openalex", "crossref", "arxiv"]] = Field(
+        default_factory=lambda: ["openalex", "crossref", "arxiv"]
+    )
 
     @model_validator(mode="after")
     def check_years(self) -> "SearchPapersInput":

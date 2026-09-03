@@ -1,3 +1,5 @@
+import asyncio
+import base64
 from collections.abc import Sequence
 from typing import Any, Self
 
@@ -35,36 +37,134 @@ class OllamaProvider(LLMProvider):
         response_model: type[StructuredOutput],
     ) -> StructuredOutput:
         format_schema = _ollama_compatible_schema(response_model.model_json_schema())
-        data = await self._request(messages, format_schema=format_schema)
-        content = data.get("message", {}).get("content")
-        if not isinstance(content, str):
-            raise LLMError("Ollama structured response did not contain message.content")
-        try:
-            return response_model.model_validate_json(content)
-        except ValueError as exc:
-            raise LLMError(f"Ollama returned invalid structured output: {exc}") from exc
+        return await self._validated_structured_request(
+            messages, response_model, format_schema, error_label="structured output"
+        )
+
+    async def structured_output_bounded(
+        self,
+        messages: Sequence[dict[str, str]],
+        response_model: type[StructuredOutput],
+        *,
+        max_output_tokens: int,
+    ) -> StructuredOutput:
+        format_schema = _ollama_compatible_schema(response_model.model_json_schema())
+        return await self._validated_structured_request(
+            messages,
+            response_model,
+            format_schema,
+            error_label="structured output",
+            max_output_tokens=max_output_tokens,
+        )
+
+    async def structured_output_with_images(
+        self,
+        messages: Sequence[dict[str, Any]],
+        images: Sequence[bytes],
+        response_model: type[StructuredOutput],
+    ) -> StructuredOutput:
+        if not self.settings.ollama_vision_model.strip():
+            raise LLMError("OLLAMA_VISION_MODEL is not configured")
+        enriched = [dict(message) for message in messages]
+        if not enriched:
+            enriched = [{"role": "user", "content": "Analyze the supplied image."}]
+        enriched[-1]["images"] = [base64.b64encode(value).decode("ascii") for value in images]
+        schema = _ollama_compatible_schema(response_model.model_json_schema())
+        return await self._validated_structured_request(
+            enriched,
+            response_model,
+            schema,
+            model=self.settings.ollama_vision_model,
+            error_label="visual analysis",
+        )
+
+    async def _validated_structured_request(
+        self,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[StructuredOutput],
+        schema: dict[str, Any],
+        *,
+        model: str | None = None,
+        error_label: str,
+        max_output_tokens: int | None = None,
+    ) -> StructuredOutput:
+        last_error: ValueError | None = None
+        effective_messages = list(messages)
+        for attempt in range(self.settings.ollama_structured_max_attempts):
+            data = await self._request(
+                effective_messages,
+                format_schema=schema,
+                model=model,
+                max_output_tokens=max_output_tokens,
+            )
+            candidates = _structured_response_candidates(data)
+            if not candidates:
+                last_error = ValueError("Ollama returned empty content and thinking fields")
+            for candidate in candidates:
+                try:
+                    return response_model.model_validate_json(candidate)
+                except ValueError as exc:
+                    last_error = exc
+            if attempt + 1 < self.settings.ollama_structured_max_attempts:
+                effective_messages = [
+                    *messages,
+                    {
+                        "role": "system",
+                        "content": (
+                            "The previous response was invalid or truncated JSON. Return only a compact "
+                            "JSON object matching the schema. Shorten prose where necessary and always "
+                            "close every string, array, and object before the output limit."
+                        ),
+                    },
+                ]
+                await asyncio.sleep(0.25 * (attempt + 1))
+        raise LLMError(f"Ollama returned invalid {error_label}: {last_error}") from last_error
 
     async def _request(
         self,
-        messages: Sequence[dict[str, str]],
+        messages: Sequence[dict[str, Any]],
         format_schema: dict[str, Any] | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> dict[str, Any]:
+        is_vision = model is not None
+        timeout_seconds = (
+            self.settings.ollama_vision_timeout_seconds
+            if is_vision else self.settings.ollama_timeout_seconds
+        )
         payload: dict[str, Any] = {
-            "model": self.settings.ollama_model,
+            "model": model or self.settings.ollama_model,
             "messages": list(messages),
             "stream": False,
             "think": False,
+            "keep_alive": "10m",
+            "options": {
+                "num_ctx": (
+                    self.settings.ollama_vision_num_ctx
+                    if is_vision else self.settings.ollama_num_ctx
+                ),
+                "num_predict": (
+                    max_output_tokens
+                    if max_output_tokens is not None
+                    else (
+                        self.settings.ollama_vision_num_predict
+                        if is_vision else self.settings.ollama_num_predict
+                    )
+                ),
+            },
         }
         if format_schema is not None:
             payload["format"] = format_schema
 
         try:
-            response = await self._client.post("/api/chat", json=payload)
+            response = await self._client.post(
+                "/api/chat", json=payload, timeout=timeout_seconds
+            )
             response.raise_for_status()
             data = response.json()
         except httpx.TimeoutException as exc:
             raise LLMError(
-                f"Ollama request timed out after {self.settings.ollama_timeout_seconds}s"
+                f"Ollama request timed out after {timeout_seconds}s"
             ) from exc
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text[:500]
@@ -122,3 +222,24 @@ def _ollama_compatible_schema(schema: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(result, dict):
         raise LLMError("Could not create an Ollama-compatible JSON schema")
     return result
+
+
+def _structured_response_candidates(data: dict[str, Any]) -> list[str]:
+    """Return likely JSON values, including Qwen's occasional thinking-only result."""
+    message = data.get("message")
+    if not isinstance(message, dict):
+        return []
+    candidates: list[str] = []
+    for key in ("content", "thinking"):
+        value = message.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        stripped = value.strip()
+        if stripped.startswith("```") and stripped.endswith("```"):
+            lines = stripped.splitlines()
+            stripped = "\n".join(lines[1:-1]).strip()
+        candidates.append(stripped)
+        start, end = stripped.find("{"), stripped.rfind("}")
+        if start >= 0 and end > start and stripped[start:end + 1] != stripped:
+            candidates.append(stripped[start:end + 1])
+    return list(dict.fromkeys(candidates))

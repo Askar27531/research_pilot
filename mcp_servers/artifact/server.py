@@ -4,8 +4,13 @@ from app.artifacts import ArtifactService
 from app.schemas import ArtifactRecord
 
 
-def create_artifact_server(service: ArtifactService) -> FastMCP:
-    server = FastMCP("ResearchPilot Artifact")
+def create_artifact_server(service: ArtifactService, auth: object | None = None) -> FastMCP:
+    server = FastMCP(
+        "ResearchPilot Artifact",
+        version="0.1.0",
+        instructions="Create safe, project-scoped Markdown, CSV, and Mermaid artifacts.",
+        auth=auth,
+    )
 
     @server.tool
     async def create_markdown(

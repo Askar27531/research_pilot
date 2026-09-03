@@ -2,27 +2,49 @@
 
 ```mermaid
 flowchart LR
-  UI[Streamlit UI] --> API[FastAPI API]
-  API --> GRAPH[LangGraph coordinator]
-  GRAPH --> AGENTS[Specialist agents + Skills]
-  AGENTS --> LM[Ollama provider]
-  AGENTS --> MCP[Literature / Document / Artifact MCP]
+  UI[Streamlit 四阶段工作台] --> API[FastAPI 核心接口]
+  API --> WSVC[WorkspaceService]
+  WSVC --> WORKER[SQLite 持久化后台 Worker]
+  WORKER --> RSVC[ResearchWorkflowService]
+  RSVC --> GRAPH[LangGraph ResearchCoordinator]
+  GRAPH --> LIT[LiteratureResearcher]
+  GRAPH --> SELECT[用户选择 1–2 篇]
+  SELECT --> ANALYST[PaperAnalyst]
+  ANALYST --> SYNTH[EvidenceSynthesizer]
+  LIT --> MCP[MCP Capability Gateway]
   MCP --> OA[OpenAlex]
-  GRAPH --> DB[(SQLite repositories + checkpointer)]
-  MCP --> WS[Project PDF workspace]
-  DB --> EV[Evidence + experiment approval]
-  EV --> ART[Versioned Markdown / CSV / Mermaid]
-  API --> TRACE[Trace, progress and metrics]
-  TRACE --> UI
+  MCP --> CR[Crossref]
+  MCP --> AX[arXiv]
+  ANALYST --> PDF[PyMuPDF / OCR]
+  ANALYST --> VLM[Ollama Vision]
+  SYNTH --> OUTPUT[逐篇分析 / 证据引用 / 双篇比较]
+  WORKER --> DB[(SQLite + Checkpoint)]
+  PDF --> WS[项目 PDF 与裁剪工作区]
+  DB --> API
+  WS --> API
 ```
 
-The API is the only UI boundary. Domain services use typed Pydantic contracts, repositories own SQLite access, and MCP adapters isolate external tools. Each long-running search item is persisted independently; LangGraph checkpoints and approval versions make restart/resume deterministic. PDF and artifact paths are project-relative and are revalidated before access.
+## HTTP 边界
 
-An incoming `X-Request-ID` is propagated through API middleware, Graph configuration, MCP calls and OpenAlex headers. Trace payloads deliberately exclude prompts and secrets.
+Streamlit 只依赖以下 6 种路径：`/health`、`/projects`、`/projects/{id}/workspace`、`/projects/{id}/actions`、`/projects/{id}/documents` 和 `/projects/{id}/resources/{token}`。项目集合路径同时提供 GET 与 POST，因此共 7 个操作。
 
-## Release boundaries
+统一 workspace 是轻量读模型；传入不透明论文令牌时才附加论文摘要、Figure Cards、Structured Tables 与轻量证据。所有状态变更进入统一 actions 接口。PDF、证据、裁剪和产物都使用项目绑定令牌，浏览器不拼接内部 ID。
 
-- One local Ollama model is configured at a time; quality and latency depend on its exact tag and digest.
-- OpenAlex online evaluation needs a valid key and network access. The default 20-item release suite is offline and deterministic.
-- PDF extraction uses PyMuPDF heuristics; scanned PDFs and complex tables may need OCR/layout tooling outside this release.
-- SQLite targets a single-machine deployment, not a multi-writer distributed service.
+## 内部职责
+
+- `Coordinator` 管理检索、人工选文、全文获取、分析和恢复边界。
+- `LiteratureResearcher` 生成查询，合并三个来源，规范化、去重并排序，然后等待用户选择。
+- `PaperAnalyst` 对每篇所选论文依次提取正文、OCR、图表区域、视觉观察和证据化结论。
+- `EvidenceSynthesizer` 只消费一至两篇论文的精简分析和 Evidence，形成综合比较。
+
+Repository 和 Service 保持细粒度，不因 REST 收敛而合并。长任务由 `workflow_jobs` 持久化；一个项目同时只允许一个活动任务。服务重启时遗留任务恢复为可领取状态，并依靠 work item 与 LangGraph checkpoint 跳过已完成工作。
+
+## 数据与可信度
+
+V9 数据库持久化检索 revision、当前选择、逐篇分析和综合报告。文本证据定位原文和页码，视觉证据定位边界框和裁剪哈希，表格证据定位表格与单元格。
+
+PDF 路径始终限制在项目工作区内，资源读取会重新验证项目归属和 SHA-256。视觉模型是新项目的强制前置能力；系统不自动下载模型，不以纯文本分析冒充完整多模态分析。
+
+## 产品边界
+
+ResearchPilot 当前止于所选论文的证据化综合分析，不生成研究方向或实验计划，也不运行实验、不生成训练代码、不调度 GPU。SQLite 面向单机部署；当前仅支持学术 PDF。

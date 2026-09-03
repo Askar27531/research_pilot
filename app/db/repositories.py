@@ -67,6 +67,45 @@ class ProjectRepository:
             row = await self._fetch(connection, project_id)
         return self._to_record(row)
 
+    async def list(self, *, limit: int = 100, offset: int = 0) -> list[ProjectRecord]:
+        async with self.database.connect() as connection:
+            rows = await (await connection.execute(
+                "SELECT * FROM projects ORDER BY updated_at DESC, id LIMIT ? OFFSET ?",
+                (limit, offset),
+            )).fetchall()
+        return [self._to_record(row) for row in rows]
+
+    async def delete(self, project_id: str) -> None:
+        """Delete a project and all database records linked through foreign keys."""
+        async with self.database.connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            await self._fetch(connection, project_id)
+            active = await (await connection.execute(
+                "SELECT 1 FROM workflow_jobs WHERE project_id=? "
+                "AND status IN ('queued','running') LIMIT 1",
+                (project_id,),
+            )).fetchone()
+            if active is not None:
+                await connection.rollback()
+                raise ProjectConflictError("Project still has an active workflow job")
+            await connection.execute("DELETE FROM projects WHERE id=?", (project_id,))
+            await connection.commit()
+
+    async def update_definition(
+        self, project_id: str, name: str, request: ResearchRequest
+    ) -> ProjectRecord:
+        async with self.database.connect() as connection:
+            cursor = await connection.execute(
+                "UPDATE projects SET name=?,goal=?,request_json=?,updated_at=?,version=version+1 "
+                "WHERE id=?",
+                (name.strip(), request.research_question, request.model_dump_json(),
+                 utc_now(), project_id),
+            )
+            if cursor.rowcount == 0:
+                raise RecordNotFoundError(f"Project not found: {project_id}")
+            await connection.commit()
+        return await self.get(project_id)
+
     async def start_run(
         self,
         project_id: str,
@@ -86,9 +125,9 @@ class ProjectRepository:
                 if row["last_run_id"] == run_id:
                     return self._to_record(row), False
                 raise ProjectConflictError("Project research is already running")
-            if resume and status != "failed":
+            if resume and status not in {"failed", "waiting"}:
                 await connection.rollback()
-                raise ProjectConflictError("Only failed projects can be resumed")
+                raise ProjectConflictError("Only failed or waiting projects can be resumed")
             if not resume and status == "failed":
                 await connection.rollback()
                 raise ProjectConflictError("Failed projects must use the resume endpoint")
@@ -115,6 +154,28 @@ class ProjectRepository:
         self, project_id: str, current_stage: str, error: dict[str, Any]
     ) -> ProjectRecord:
         return await self._set_terminal(project_id, "failed", current_stage, error)
+
+    async def set_stage(self, project_id: str, current_stage: str) -> ProjectRecord:
+        async with self.database.connect() as connection:
+            cursor = await connection.execute(
+                "UPDATE projects SET current_stage=?,updated_at=?,version=version+1 WHERE id=?",
+                (current_stage, utc_now(), project_id),
+            )
+            if cursor.rowcount == 0:
+                raise RecordNotFoundError(f"Project not found: {project_id}")
+            await connection.commit()
+        return await self.get(project_id)
+
+    async def reopen(self, project_id: str, current_stage: str) -> ProjectRecord:
+        async with self.database.connect() as connection:
+            cursor = await connection.execute(
+                "UPDATE projects SET status='waiting',current_stage=?,error_json=NULL,updated_at=?,"
+                "version=version+1 WHERE id=?", (current_stage, utc_now(), project_id),
+            )
+            if cursor.rowcount == 0:
+                raise RecordNotFoundError(f"Project not found: {project_id}")
+            await connection.commit()
+        return await self.get(project_id)
 
     async def _set_terminal(
         self,
@@ -166,7 +227,9 @@ class PaperRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    async def upsert_ranked(self, project_id: str, ranked: RankedPaper) -> StoredPaper:
+    async def upsert_ranked(
+        self, project_id: str, ranked: RankedPaper, *, selected: bool = False
+    ) -> StoredPaper:
         key = paper_key(ranked.paper)
         now = utc_now()
         identifier = str(uuid4())
@@ -177,14 +240,14 @@ class PaperRepository:
                     id, project_id, stable_key, metadata_json, lexical_score,
                     llm_score, relevance_score, selection_reason, selected,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id, stable_key) DO UPDATE SET
                     metadata_json=excluded.metadata_json,
                     lexical_score=excluded.lexical_score,
                     llm_score=excluded.llm_score,
                     relevance_score=excluded.relevance_score,
                     selection_reason=excluded.selection_reason,
-                    selected=1,
+                    selected=excluded.selected,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -196,6 +259,7 @@ class PaperRepository:
                     ranked.llm_score,
                     ranked.final_score,
                     ranked.selection_reason,
+                    int(selected),
                     now,
                     now,
                 ),
@@ -224,6 +288,15 @@ class PaperRepository:
             )
             rows = await cursor.fetchall()
         return [self._to_record(row) for row in rows]
+
+    async def get(self, project_id: str, paper_id: str) -> StoredPaper:
+        async with self.database.connect() as connection:
+            row = await (await connection.execute(
+                "SELECT * FROM papers WHERE project_id=? AND id=?", (project_id, paper_id)
+            )).fetchone()
+        if row is None:
+            raise RecordNotFoundError("Paper not found")
+        return self._to_record(row)
 
     @staticmethod
     def _to_record(row: aiosqlite.Row) -> StoredPaper:

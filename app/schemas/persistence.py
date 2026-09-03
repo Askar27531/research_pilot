@@ -5,13 +5,9 @@ from pydantic import BaseModel, Field
 
 from app.schemas.literature import PaperMetadata
 from app.schemas.research import ResearchRequest
+from app.schemas.transfer import PaperAcquisition
 
 ProjectStatus = Literal["created", "running", "waiting", "completed", "failed"]
-
-
-class ProjectCreateRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    request: ResearchRequest
 
 
 class ProjectRecord(BaseModel):
@@ -40,6 +36,7 @@ class StoredPaper(BaseModel):
     selected: bool
     created_at: datetime
     updated_at: datetime
+    acquisition: PaperAcquisition | None = None
 
 
 class TraceRecord(BaseModel):
@@ -55,16 +52,3 @@ class TraceRecord(BaseModel):
     summary: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     created_at: datetime
-
-
-class ProjectRunRequest(BaseModel):
-    run_id: str | None = Field(default=None, min_length=1, max_length=128)
-
-
-class ProjectRunResponse(BaseModel):
-    project_id: str
-    run_id: str
-    status: ProjectStatus
-    current_stage: str
-    selected_paper_count: int = Field(ge=0)
-    resumed: bool = False

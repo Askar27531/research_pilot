@@ -12,26 +12,13 @@ from app.graph.search_nodes import (
     select_papers_node,
 )
 from app.graph.state import ResearchState
-from app.literature import LiteratureMCPClient
+from app.literature import LiteratureToolClient
 from app.llm import LLMProvider
-
-
-def build_research_graph(
-    provider: LLMProvider,
-    checkpointer: Any | None = None,
-) -> Any:
-    """Compile the minimal P0 research workflow."""
-
-    builder = StateGraph(ResearchState)
-    builder.add_node("understand_request", make_understand_request_node(provider))
-    builder.add_edge(START, "understand_request")
-    builder.add_edge("understand_request", END)
-    return builder.compile(checkpointer=checkpointer)
 
 
 def build_literature_search_graph(
     provider: LLMProvider,
-    literature: LiteratureMCPClient,
+    literature: LiteratureToolClient,
     checkpointer: Any | None = None,
 ) -> Any:
     """Compile the P1 literature search, deduplication, ranking, and selection workflow."""

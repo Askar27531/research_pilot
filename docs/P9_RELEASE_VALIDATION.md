@@ -5,7 +5,7 @@
 | Gate | Command | Acceptance |
 |---|---|---|
 | 20-item regression eval | `python -m evals.run_researchpilot_eval` | 20 tasks, four categories, 100% pass rate |
-| Fixed offline demo | `python -m scripts.run_fixed_demo` | all six release scenarios pass |
+| Real workflow demo | `python -m scripts.run_fixed_demo` | running API reaches a real workflow approval state |
 | Full tests | `python -m pytest -q` | no failures |
 | Static checks | `python -m ruff check .` | no findings |
 | Dependency consistency | `python -m pip check` | no broken requirements |
@@ -24,6 +24,13 @@ The Skills and compact-context entries in dataset v1 are frozen reference fixtur
 ## Reproducibility
 
 The runner is deterministic for a given dataset file. `run_id` and `started_at` intentionally vary; aggregate and item metrics must remain identical. When the source directory is not a Git checkout, `git_commit` is recorded as `unavailable` rather than fabricated.
+
+The current `scripts.run_fixed_demo` is intentionally not an offline pytest wrapper. It creates a
+real multi-agent wildfire-suppression research profile against a running API, performs online
+search and acquisition, and reports the actual project, papers, method cards and trace. If open
+PDFs are unavailable it consumes PDFs from `RESEARCHPILOT_DEMO_PDF_DIR` or exits at the documented
+`awaiting_documents` approval boundary. The historical results below describe the original P9
+release and are retained only as dated evidence.
 
 ## Validated release result (2026-08-09)
 

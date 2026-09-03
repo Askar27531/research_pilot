@@ -19,21 +19,29 @@ from app.api.errors import (
     record_not_found_handler,
     validation_error_handler,
 )
-from app.api.routes.artifacts import router as artifacts_router
-from app.api.routes.evidence import router as evidence_router
-from app.api.routes.experiments import router as experiments_router
+from app.api.routes.core import router as core_router
 from app.api.routes.health import router as health_router
-from app.api.routes.models import router as models_router
-from app.api.routes.projects import router as projects_router
-from app.api.routes.research import router as research_router
+from app.api.routes.mcp import router as mcp_router
+from app.artifacts import ArtifactService
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.db import Database
+from app.db import ArtifactRepository, Database
 from app.db.errors import EvidenceReferencedError, ProjectConflictError, RecordNotFoundError
 from app.documents import DocumentError, DocumentService, PDFParser, WorkspaceManager
 from app.literature.errors import LiteratureError
 from app.llm import LLMError
+from app.mcp import (
+    ArtifactCapabilityClient,
+    CapabilityRouter,
+    DocumentCapabilityClient,
+    LiteratureCapabilityClient,
+    MCPRegistry,
+)
 from app.skills import SkillRegistry
+from app.workflow_worker import WorkflowWorker
+from mcp_servers.artifact import create_artifact_server
+from mcp_servers.document import create_document_server
+from mcp_servers.literature.server import mcp as literature_mcp
 
 
 @asynccontextmanager
@@ -56,11 +64,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.workspace_root, max_document_bytes=settings.document_max_bytes
     )
     app.state.document_service = DocumentService(
-        workspace, PDFParser(workspace, render_dpi=settings.document_render_dpi)
+        workspace, PDFParser(workspace, render_dpi=settings.pdf_render_dpi)
     )
+    artifact_service = ArtifactService(workspace, ArtifactRepository(database))
+    registry = MCPRegistry.load(settings.mcp_config_path, {
+        "researchpilot-literature": literature_mcp,
+        "researchpilot-document": create_document_server(app.state.document_service),
+        "researchpilot-artifact": create_artifact_server(artifact_service),
+    })
+    await registry.discover()
+    app.state.mcp_registry = registry
+    app.state.capability_router = CapabilityRouter(registry)
+    app.state.document_capabilities = DocumentCapabilityClient(app.state.capability_router)
+    app.state.artifact_capabilities = ArtifactCapabilityClient(app.state.capability_router)
+    literature = LiteratureCapabilityClient(app.state.capability_router)
+    workflow_worker = WorkflowWorker(app, literature)
+    app.state.workflow_worker = workflow_worker
+    await workflow_worker.start()
     try:
         yield
     finally:
+        await workflow_worker.close()
         await checkpoint_connection.close()
 
 
@@ -69,7 +93,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="ResearchPilot API",
         version="0.1.0",
-        description="Skill-driven multimodal deep research agent",
+        description="Local-first, evidence-traceable multimodal paper research assistant",
         lifespan=lifespan,
     )
     app.add_middleware(RequestIDMiddleware)
@@ -83,12 +107,8 @@ def create_app() -> FastAPI:
     app.add_exception_handler(DocumentError, document_error_handler)
     app.add_exception_handler(Exception, internal_error_handler)
     app.include_router(health_router)
-    app.include_router(models_router)
-    app.include_router(research_router)
-    app.include_router(projects_router)
-    app.include_router(evidence_router)
-    app.include_router(experiments_router)
-    app.include_router(artifacts_router)
+    app.include_router(mcp_router)
+    app.include_router(core_router)
     return app
 
 

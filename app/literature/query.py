@@ -72,23 +72,18 @@ def _fallback_plan(
 ) -> SearchQueryPlan:
     concepts = list(dict.fromkeys([*request.keywords, *understanding.core_concepts]))
     core = " ".join(concepts) or request.research_question
-    groups = [[concept] for concept in concepts[:5]] or [[request.research_question]]
+    seeds = request.keywords[:3] or [core]
+    while len(seeds) < 3:
+        suffix = ("survey", "method algorithm")[len(seeds) - 1]
+        seeds.append(f"{seeds[0]} {suffix}")
+    purposes = ("high_precision", "synonym_expansion", "method_expansion")
     queries = [
-        SearchQuery(query=core, purpose="high_precision", concepts=concepts or [core]),
-        SearchQuery(
-            query=f"{core} multimodal cross-spectral",
-            purpose="synonym_expansion",
-            concepts=[*concepts, "cross-spectral"],
-        ),
-        SearchQuery(
-            query=f"{core} deep learning method",
-            purpose="method_expansion",
-            concepts=[*concepts, "deep learning"],
-        ),
+        SearchQuery(query=seed, purpose=purpose, concepts=[seed])
+        for seed, purpose in zip(seeds, purposes, strict=True)
     ]
     return SearchQueryPlan(
         topic=request.research_question,
-        required_concept_groups=groups,
+        required_concept_groups=[],
         excluded_topics=[],
         queries=queries,
     )

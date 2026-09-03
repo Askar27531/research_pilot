@@ -1,9 +1,9 @@
 {
-  "run_id": "f249d400-65f2-4b59-8c33-34819315d597",
+  "run_id": "9ebfa383-1d1d-45e7-aef7-6e3015c33d43",
   "dataset_name": "ResearchPilot-Eval",
   "dataset_version": "1.0.0",
-  "started_at": "2026-08-24T07:42:00.962539+00:00",
-  "git_commit": "unavailable",
+  "started_at": "2026-08-30T12:23:22.621527+00:00",
+  "git_commit": "cbdc118f34a4697a77fecc4857acec0bf4ccf80f",
   "model_name": "qwen3:14b",
   "model_digest": "unrecorded",
   "parameters": {

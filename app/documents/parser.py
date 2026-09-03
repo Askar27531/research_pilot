@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import re
 from uuid import uuid4
 
@@ -22,6 +23,7 @@ HEADING_PATTERN = re.compile(
 )
 FIGURE_PATTERN = re.compile(r"^(?:fig(?:ure)?\.?)[ ]*(\d+[A-Za-z]?)\b", re.IGNORECASE)
 TABLE_PATTERN = re.compile(r"^table[ ]*(\d+[A-Za-z]?)\b", re.IGNORECASE)
+logger = logging.getLogger(__name__)
 
 
 class PDFParser:
@@ -47,7 +49,15 @@ class PDFParser:
                 page_number = index + 1
                 try:
                     page = document.load_page(index)
-                    text = page.get_text("text")
+                    text = page.get_text("text", sort=True)
+                    if len(text.strip()) < 40:
+                        try:
+                            text_page = page.get_textpage_ocr(
+                                language="eng", dpi=self.render_dpi, full=False
+                            )
+                            text = page.get_text("text", textpage=text_page, sort=True)
+                        except Exception as exc:  # noqa: BLE001 - vision handles scan fallback
+                            logger.debug("OCR unavailable for page %s: %s", page_number, exc)
                     screenshot = self._render_page(project_id, document_id, page, page_number)
                     pages.append(
                         DocumentPage(
@@ -66,7 +76,12 @@ class PDFParser:
                             project_id, document_id, document, page, page_number, seen_images
                         )
                     )
-                    tables.extend(self._find_tables(document_id, page, page_number))
+                    figures.extend(self._extract_vector_regions(
+                        project_id, document_id, page, page_number
+                    ))
+                    tables.extend(self._find_tables(
+                        project_id, document_id, page, page_number
+                    ))
                 except Exception as exc:  # noqa: BLE001 - isolate a corrupt page and continue
                     warnings.append(f"Page {page_number} failed: {type(exc).__name__}: {exc}")
                     rect = document.load_page(index).rect
@@ -154,6 +169,39 @@ class PDFParser:
             )
         return results
 
+    def _extract_vector_regions(
+        self, project_id: str, document_id: str, page: pymupdf.Page, page_number: int
+    ) -> list[DocumentFigure]:
+        cluster = getattr(page, "cluster_drawings", None)
+        if cluster is None:
+            return []
+        results: list[DocumentFigure] = []
+        try:
+            regions = cluster(drawings=page.get_drawings())
+        except Exception:  # noqa: BLE001 - vector extraction is best effort
+            return []
+        for rect in regions:
+            rect = pymupdf.Rect(rect)
+            if rect.width < 100 or rect.height < 80 or rect.get_area() < 20_000:
+                continue
+            caption, label = self._nearest_caption(page, rect, FIGURE_PATTERN)
+            if not caption:
+                continue
+            figure_id = str(uuid4())
+            relative = f"parsed/{document_id}/figures/{figure_id}.png"
+            path = self.workspace.resolve_safe_path(project_id, relative)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            content = page.get_pixmap(dpi=self.render_dpi, alpha=False, clip=rect).tobytes("png")
+            path.write_bytes(content)
+            results.append(DocumentFigure(
+                figure_id=figure_id, document_id=document_id, page_number=page_number,
+                label=label, caption=caption, figure_type=self._classify_figure(caption),
+                bbox=BoundingBox(x0=rect.x0, y0=rect.y0, x1=rect.x1, y1=rect.y1),
+                source_path=relative, sha256=hashlib.sha256(content).hexdigest(),
+                extraction_method="vector_region",
+            ))
+        return results
+
     @staticmethod
     def _nearest_caption(
         page: pymupdf.Page, rect: pymupdf.Rect, pattern: re.Pattern[str]
@@ -222,11 +270,35 @@ class PDFParser:
             )
         return sections
 
-    @classmethod
     def _find_tables(
-        cls, document_id: str, page: pymupdf.Page, page_number: int
+        self, project_id: str, document_id: str, page: pymupdf.Page, page_number: int
     ) -> list[TableCandidate]:
         results: list[TableCandidate] = []
+        try:
+            found = page.find_tables()
+        except Exception:  # noqa: BLE001 - table extraction is best effort
+            found = None
+        if found is not None:
+            for table in found.tables:
+                rect = pymupdf.Rect(table.bbox)
+                caption, label = self._nearest_caption(page, rect, TABLE_PATTERN)
+                table_id = str(uuid4())
+                relative = f"parsed/{document_id}/tables/{table_id}.png"
+                path = self.workspace.resolve_safe_path(project_id, relative)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                content = page.get_pixmap(
+                    dpi=self.render_dpi, alpha=False, clip=rect
+                ).tobytes("png")
+                path.write_bytes(content)
+                results.append(TableCandidate(
+                    table_id=table_id, document_id=document_id, page_number=page_number,
+                    label=label, caption=caption,
+                    bbox=BoundingBox(x0=rect.x0, y0=rect.y0, x1=rect.x1, y1=rect.y1),
+                    cells=table.extract(), source_path=relative,
+                    sha256=hashlib.sha256(content).hexdigest(),
+                ))
+        if results:
+            return results
         for block in page.get_text("blocks"):
             text = " ".join(str(block[4]).split())
             match = TABLE_PATTERN.search(text)

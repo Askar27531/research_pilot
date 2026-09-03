@@ -1,0 +1,26 @@
+{
+  "name": "ResearchPilot Method Transfer Profiles",
+  "version": "1.0.0",
+  "profiles": [
+    {
+      "case_id": "wildfire-marl",
+      "problem_statement": "Coordinate multiple UAVs with multi-agent reinforcement learning for wildfire suppression",
+      "objectives": ["reduce burned area", "reduce containment time"],
+      "baseline": "MAPPO",
+      "environment_or_data": ["dynamic fire-spread simulation", "local UAV observations"],
+      "constraints": ["limited communication", "limited payload and endurance"],
+      "metrics": ["burned area", "containment time", "resource use", "agent safety"],
+      "pain_points": ["partial observability", "dynamic task allocation", "safety constraints"]
+    },
+    {
+      "case_id": "rgb-lwir-registration",
+      "problem_statement": "Improve RGB-LWIR image registration under large modality and viewpoint differences",
+      "objectives": ["reduce registration error", "improve robustness"],
+      "baseline": "feature matching and geometric estimation",
+      "environment_or_data": ["paired RGB and LWIR imagery"],
+      "constraints": ["limited paired labels", "cross-modal appearance gap"],
+      "metrics": ["registration error", "success rate"],
+      "pain_points": ["cross-modal representation", "outlier correspondence rejection"]
+    }
+  ]
+}

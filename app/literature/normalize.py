@@ -43,5 +43,8 @@ def map_openalex_work(work: dict[str, Any], query: str | None = None) -> PaperMe
         venue=source.get("display_name"),
         citation_count=max(0, int(work.get("cited_by_count") or 0)),
         open_access_url=oa_url,
+        openalex_id=source_id,
+        sources=["openalex"],
+        source_records=[{"source": "openalex", "id": source_id}],
         source_queries=[query] if query else [],
     )

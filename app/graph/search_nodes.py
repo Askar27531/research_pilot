@@ -8,7 +8,7 @@ from app.literature.errors import (
     OpenAlexAuthRequiredError,
 )
 from app.literature.filtering import filter_by_required_concepts
-from app.literature.mcp_client import LiteratureMCPClient
+from app.literature.mcp_client import LiteratureToolClient
 from app.literature.query import generate_search_queries
 from app.literature.ranking import rank_papers
 from app.llm import LLMProvider
@@ -44,7 +44,7 @@ def make_generate_queries_node(provider: LLMProvider) -> SearchNode:
     return generate_queries
 
 
-def make_search_papers_node(literature: LiteratureMCPClient) -> SearchNode:
+def make_search_papers_node(literature: LiteratureToolClient) -> SearchNode:
     async def search(state: ResearchState) -> dict[str, object]:
         request = ResearchRequest.model_validate(state["request"])
         queries = [SearchQuery.model_validate(item) for item in state["search_queries"]]
@@ -54,12 +54,14 @@ def make_search_papers_node(literature: LiteratureMCPClient) -> SearchNode:
         per_query_limit = min(30, max(request.maximum_papers * 2, 10))
         for query in queries:
             try:
-                result = await literature.search_papers(
-                    query.query,
-                    request.year_from,
-                    request.year_to,
-                    per_query_limit,
-                )
+                try:
+                    result = await literature.search_papers(
+                        query.query, request.year_from, request.year_to, per_query_limit,
+                        sources=request.literature_sources,
+                    )
+                except TypeError:
+                    result = await literature.search_papers(
+                        query.query, request.year_from, request.year_to, per_query_limit)
                 papers.extend(result.papers)
                 warnings.extend(result.warnings)
                 successes += 1
@@ -103,20 +105,24 @@ async def filter_papers_node(state: ResearchState) -> dict[str, object]:
         strategy.get("required_concept_groups", []),
         strategy.get("excluded_topics", []),
     )
-    if not result.included:
-        raise LiteratureUnavailableError(
-            "Required-concept filtering removed every candidate; revise the search strategy"
-        )
+    fallback_used = not result.included
+    included = result.included or papers
     plan = dict(state["plan"])
     plan["concept_filter"] = {
         "input_count": len(papers),
-        "included_count": len(result.included),
+        "included_count": len(included),
         "excluded_count": len(result.excluded),
         "matched_concepts": result.matched_concepts,
+        "fallback_used": fallback_used,
     }
     return {
-        "candidate_papers": [paper.model_dump(mode="json") for paper in result.included],
+        "candidate_papers": [paper.model_dump(mode="json") for paper in included],
         "plan": plan,
+        "warnings": [
+            *state["warnings"],
+            *(["Concept filter matched no candidates; deferred inclusion to LLM screening"]
+              if fallback_used else []),
+        ],
         "current_stage": "papers_concept_filtered",
     }
 

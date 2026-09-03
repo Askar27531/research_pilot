@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -13,6 +14,9 @@ class ResearchRequest(BaseModel):
     maximum_papers: int = Field(default=15, ge=1, le=100)
     existing_files: list[str] = Field(default_factory=list, max_length=100)
     constraints: list[str] = Field(default_factory=list, max_length=50)
+    literature_sources: list[Literal["openalex", "crossref", "arxiv"]] = Field(
+        default_factory=lambda: ["openalex", "crossref", "arxiv"]
+    )
 
     @field_validator("research_question")
     @classmethod

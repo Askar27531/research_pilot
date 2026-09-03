@@ -56,7 +56,6 @@ class ExperimentProposalDraft(BaseModel):
             raise ValueError("Ablation references an unknown experiment")
         return self
 
-
 class ExperimentProposal(ExperimentProposalDraft):
     proposal_id: str
     project_id: str
@@ -65,11 +64,6 @@ class ExperimentProposal(ExperimentProposalDraft):
     created_at: str
     updated_at: str
     decision_feedback: str | None = None
-
-
-class ProposalCreateRequest(BaseModel):
-    objective: str = Field(min_length=3, max_length=4_000)
-    evidence_ids: list[str] = Field(min_length=1, max_length=100)
 
 
 class ExperimentUpdate(BaseModel):
@@ -94,8 +88,3 @@ class ProposalDecision(BaseModel):
         if self.action != "modify" and self.experiment_updates:
             raise ValueError("Experiment updates are only allowed for modify")
         return self
-
-
-class ProposalRunResponse(BaseModel):
-    proposal: ExperimentProposal
-    interrupted: bool

@@ -20,6 +20,8 @@ from app.schemas import PaperMetadata, SearchPapersInput, SearchResult
 class OpenAlexClient:
     """Async OpenAlex API client with bounded retries and business-model mapping."""
 
+    name = "openalex"
+
     def __init__(
         self,
         settings: Settings | None = None,

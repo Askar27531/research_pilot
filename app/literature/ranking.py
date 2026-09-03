@@ -59,7 +59,8 @@ async def rank_papers(
         ((paper, lexical_score(paper, request)) for paper in papers),
         key=lambda item: (-item[1], item[0].stable_id),
     )
-    candidates = lexical[: config.ranking_llm_top_n]
+    screening_limit = min(config.ranking_llm_top_n, max(request.maximum_papers, 3))
+    candidates = lexical[:screening_limit]
     llm_scores: dict[str, tuple[bool, float, str, list[str]]] = {}
     warnings: list[str] = []
     uncached: list[tuple[PaperMetadata, float]] = []

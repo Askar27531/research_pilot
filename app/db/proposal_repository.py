@@ -51,6 +51,13 @@ class ProposalRepository:
             raise RecordNotFoundError("Experiment proposal not found")
         return ExperimentProposal.model_validate_json(row["payload_json"])
 
+    async def delete_for_resynthesis(self, project_id: str) -> None:
+        async with self.database.connect() as connection:
+            await connection.execute(
+                "DELETE FROM experiment_proposals WHERE project_id=?", (project_id,)
+            )
+            await connection.commit()
+
     async def decide(
         self,
         project_id: str,

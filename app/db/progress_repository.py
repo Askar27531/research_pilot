@@ -17,6 +17,8 @@ class WorkItemRepository:
         item_key: str,
         item_type: str,
         input_hash: str,
+        *,
+        replace_changed: bool = False,
     ) -> tuple[WorkItemProgress, bool]:
         now = utc_now()
         async with self.database.connect() as connection:
@@ -29,6 +31,17 @@ class WorkItemRepository:
             ).fetchone()
             if row is not None:
                 if row["input_hash"] != input_hash:
+                    if replace_changed:
+                        await connection.execute(
+                            """
+                            UPDATE work_items SET status='running', attempts=attempts+1,
+                                input_hash=?, result_json=NULL, error_json=NULL,
+                                latency_ms=NULL, updated_at=? WHERE id=?
+                            """,
+                            (input_hash, now, row["id"]),
+                        )
+                        await connection.commit()
+                        return await self.get(project_id, run_scope, item_key), True
                     await connection.rollback()
                     raise ProjectConflictError("Work item key was reused with different input")
                 if row["status"] == "completed":

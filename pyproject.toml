@@ -19,7 +19,7 @@ dependencies = [
     "python-dotenv>=1.1,<2",
     "python-multipart>=0.0.20,<1",
     "pymupdf>=1.26,<2",
-    "streamlit>=1.48,<2",
+    "streamlit[pdf]>=1.48,<2",
     "uvicorn[standard]>=0.35,<1",
 ]
 
@@ -31,8 +31,14 @@ dev = [
     "ruff>=0.12,<1",
 ]
 
+[project.scripts]
+researchpilot-mcp = "mcp_servers.cli:main"
+
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["app*", "mcp_servers*"]
+
+[tool.setuptools.package-data]
+"app.mcp" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

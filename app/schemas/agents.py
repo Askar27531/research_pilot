@@ -2,13 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-AgentName = Literal[
-    "coordinator",
-    "literature_researcher",
-    "multimodal_analyst",
-    "research_builder",
-]
-TaskType = Literal["literature_search", "multimodal_analysis", "research_build"]
+AgentName = Literal["coordinator", "literature_researcher"]
+TaskType = Literal["literature_search"]
 
 
 class AgentTask(BaseModel):
@@ -37,13 +32,6 @@ class AgentResult(BaseModel):
     output: dict[str, Any] = Field(default_factory=dict)
     loaded_skills: list[str] = Field(default_factory=list)
     error: dict[str, Any] | None = None
-
-
-class AgentCapability(BaseModel):
-    agent: AgentName
-    supported_tasks: list[TaskType]
-    available: bool
-    description: str
 
 
 class SkillMetadata(BaseModel):

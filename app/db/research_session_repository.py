@@ -28,12 +28,6 @@ class ResearchSessionRepository:
                 "DELETE FROM selected_paper_analyses WHERE project_id=?", (project_id,)
             )
             await connection.execute("DELETE FROM paper_summaries WHERE project_id=?", (project_id,))
-            await connection.execute("DELETE FROM method_cards WHERE project_id=?", (project_id,))
-            await connection.execute(
-                "DELETE FROM transfer_candidate_sets WHERE project_id=?", (project_id,)
-            )
-            await connection.execute("DELETE FROM experiment_proposals WHERE project_id=?", (project_id,))
-            await connection.execute("DELETE FROM artifacts WHERE project_id=?", (project_id,))
             await connection.execute("DELETE FROM paper_acquisitions WHERE project_id=?", (project_id,))
             await connection.execute("DELETE FROM documents WHERE project_id=?", (project_id,))
             await connection.commit()
@@ -146,11 +140,6 @@ class ResearchSessionRepository:
             await connection.execute(
                 "DELETE FROM selected_paper_analyses WHERE project_id=?", (project_id,)
             )
-            await connection.execute(
-                "DELETE FROM transfer_candidate_sets WHERE project_id=?", (project_id,)
-            )
-            await connection.execute("DELETE FROM experiment_proposals WHERE project_id=?", (project_id,))
-            await connection.execute("DELETE FROM artifacts WHERE project_id=?", (project_id,))
             await connection.commit()
 
     async def save_paper_analysis(

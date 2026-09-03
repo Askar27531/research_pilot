@@ -84,18 +84,11 @@ async def rank_papers(
             }
             for paper, _ in uncached
         ]
+        # 筛选指令由 SkillAwareProvider 按 PaperScreeningBatch 注入 paper-screening 技能，
+        # 本函数只提供输入；include/0-100 等判定规则见技能文件，剔除与合并为确定性步骤。
         try:
             result = await provider.structured_output(
                 [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Screen papers for direct relevance to the research topic. Return every "
-                            "stable_id exactly once. Set include=false for adjacent tasks such as "
-                            "fusion, detection, sensing, or reviews that do not directly study the "
-                            "requested task. Give a 0-100 relevance score and a very short reason."
-                        ),
-                    },
                     {
                         "role": "user",
                         "content": request.model_dump_json()

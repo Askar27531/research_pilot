@@ -60,7 +60,6 @@ def step_header(stage: str, project_id: str | None = None) -> int:
     active = {"setup": 1, "searching": 2, "paper_selection": 3,
               "acquiring_selected": 4, "documents_needed": 4,
               "analyzing_selected": 4, "analysis_review": 4,
-              "direction_review": 4, "researching": 4, "experiment_review": 4,
               "failed": 4}.get(stage, 1)
     labels = ("描述课题", "检索文献", "选择论文", "证据化分析")
     state_key = f"workflow-view-{project_id}" if project_id else None
@@ -303,11 +302,6 @@ def render_research_materials(project_id: str, workspace: dict) -> None:
             item["resource_url"],
             item,
         )
-    if workspace.get("output_freshness") == "stale" and st.button(
-        "根据复核更新研究结果", type="primary", icon=":material/refresh:"
-    ):
-        submit_action(project_id, {"type": "refresh_results"})
-        st.rerun()
 
 
 def render_search_plan(workspace: dict) -> None:
@@ -544,77 +538,6 @@ def render_analysis_report(_project_id: str, workspace: dict) -> None:
         st.rerun()
 
 
-def render_revision(project_id: str, target: str, label: str, placeholder: str) -> None:
-    state_key = f"{target}_preview"
-    with st.form(f"{target}_revision"):
-        instruction = st.text_area(label, placeholder=placeholder)
-        submitted = st.form_submit_button("生成调整预览")
-    if submitted:
-        result = submit_action(project_id, {
-            "type": f"{target}_revision_preview", "instruction": instruction})
-        if result:
-            st.session_state[state_key] = result["preview"]
-    preview = st.session_state.get(state_key)
-    if preview:
-        st.info(preview["summary"])
-        if st.button("确认应用调整", type="primary", key=f"apply_{target}_revision"):
-            submit_action(project_id, {
-                "type": f"{target}_revision_apply",
-                "preview_token": preview["preview_token"],
-            })
-            st.session_state.pop(state_key, None)
-            st.rerun()
-
-
-def render_direction(project_id: str, direction: dict) -> None:
-    st.subheader("审阅研究方向")
-    combinations = (direction or {}).get("combinations", [])[:3]
-    for item in combinations:
-        with st.container(border=True):
-            st.markdown(f"### {item['title']}")
-            st.write(item["target_challenge"])
-            for step in item.get("integration_design", []):
-                st.write(f"- {step}")
-            st.caption("主要风险：" + "；".join(item.get("assumptions", [])))
-    with st.container(horizontal=True):
-        if st.button("采用这个方向", type="primary", icon=":material/check:"):
-            submit_action(project_id, {"type": "direction_decision", "decision": "accept"})
-            st.rerun()
-        if st.button("暂不采用", icon=":material/close:"):
-            submit_action(project_id, {"type": "direction_decision", "decision": "reject"})
-            st.rerun()
-    render_revision(project_id, "direction", "请帮我调整", "描述希望如何调整研究方向")
-
-
-def render_plan(project_id: str, proposal: dict) -> None:
-    st.subheader("确认研究方案")
-    st.info("ResearchPilot 只生成研究和实验计划，不会执行实验或生成训练任务。")
-    for experiment in (proposal or {}).get("experiments", []):
-        with st.container(border=True):
-            st.markdown(f"### {experiment['title']}")
-            st.markdown(f"**Baseline**：{experiment['baseline']}")
-            st.markdown(f"**计划改动**：{experiment['modification']}")
-            st.write("指标：" + "、".join(experiment.get("metrics", [])))
-            st.success("成功判据：" + experiment["success_criterion"])
-            st.warning("失败判据：" + experiment["failure_criterion"])
-    with st.container(horizontal=True):
-        if st.button("确认方案并生成材料", type="primary", icon=":material/check:"):
-            submit_action(project_id, {"type": "plan_decision", "decision": "accept"})
-            st.rerun()
-        if st.button("暂不采用方案", icon=":material/close:"):
-            submit_action(project_id, {"type": "plan_decision", "decision": "reject"})
-            st.rerun()
-    render_revision(project_id, "plan", "调整方案", "描述希望修改的假设、指标或消融")
-
-
-def render_completed(project_id: str, workspace: dict) -> None:
-    st.success(workspace["status_detail"])
-    for resource in workspace.get("resources", []):
-        with st.container(border=True):
-            st.write(f"**{resource['name']}** · v{resource['version']}")
-            st.link_button("下载", f"{API}{resource['url']}", icon=":material/download:")
-
-
 def render_wait(_project_id: str, _workspace: dict) -> None:
     st.status("后台研究正在进行，可以关闭页面后稍后再回来。", state="running")
 
@@ -630,13 +553,6 @@ ACTION_RENDERERS = {
     "upload_documents": lambda project_id, workspace: render_documents(
         project_id, workspace["next_action"]
     ),
-    "review_direction": lambda project_id, workspace: render_direction(
-        project_id, workspace["direction"]
-    ),
-    "review_experiment": lambda project_id, workspace: render_plan(
-        project_id, workspace["experiment"]
-    ),
-    "download": render_completed,
     "retry": render_retry,
 }
 

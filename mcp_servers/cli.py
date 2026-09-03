@@ -1,16 +1,10 @@
 import argparse
-import asyncio
 import hmac
 import os
 from ipaddress import ip_address
 
 from fastmcp.server.auth import AccessToken, TokenVerifier
 
-from app.artifacts import ArtifactService
-from app.core.config import get_settings
-from app.db import ArtifactRepository, Database
-from app.documents import WorkspaceManager
-from mcp_servers.artifact import create_artifact_server
 from mcp_servers.document import create_document_server
 from mcp_servers.literature import create_literature_server
 
@@ -39,21 +33,11 @@ def _is_loopback(host: str) -> bool:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="researchpilot-mcp")
-    parser.add_argument("--server", choices=("literature", "document", "artifact"), required=True)
+    parser.add_argument("--server", choices=("literature", "document"), required=True)
     parser.add_argument("--transport", choices=("stdio", "http"), default="stdio")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8100)
     return parser
-
-
-def _artifact_server(auth: object | None):
-    settings = get_settings()
-    database = Database(settings.database_path)
-    asyncio.run(database.initialize())
-    workspace = WorkspaceManager(
-        settings.workspace_root, max_document_bytes=settings.document_max_bytes
-    )
-    return create_artifact_server(ArtifactService(workspace, ArtifactRepository(database)), auth)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -69,10 +53,8 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.server == "literature":
         server = create_literature_server(auth=auth)
-    elif args.server == "document":
-        server = create_document_server(allow_local_files=args.transport == "stdio", auth=auth)
     else:
-        server = _artifact_server(auth)
+        server = create_document_server(auth=auth)
 
     if args.transport == "stdio":
         server.run(transport="stdio")

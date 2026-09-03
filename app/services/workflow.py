@@ -5,30 +5,24 @@ from app.agents import (
     Coordinator,
     EvidenceSynthesizer,
     LiteratureResearcher,
-    MultimodalAnalyst,
     PaperAnalyst,
-    ResearchBuilder,
 )
-from app.artifacts import generate_transfer_artifacts
 from app.db import (
     DocumentRepository,
     EvidenceRepository,
     PaperRepository,
     ProjectRepository,
-    ProposalRepository,
     ResearchDataRepository,
     ResearchSessionRepository,
     TraceRepository,
     TransferRepository,
     WorkItemRepository,
 )
-from app.db.errors import RecordNotFoundError
 from app.db.repositories import utc_now
 from app.documents.acquisition import OpenAccessDownloader
-from app.experiments import ProposalBuilder, build_experiment_graph
 from app.literature import LiteratureToolClient
 from app.llm import OllamaProvider
-from app.schemas import AgentTask, ExperimentProposal, PaperAcquisition, RankedPaper
+from app.schemas import AgentTask, PaperAcquisition, RankedPaper
 
 
 async def _resolve_open_access_url(literature, metadata) -> tuple[str | None, str | None]:
@@ -62,9 +56,6 @@ class ResearchWorkflowService:
             if job.job_type == "document_analysis":
                 await self._analyze_selected(job, provider, projects)
                 return
-            if job.job_type == "resynthesis":
-                await self._resynthesize(job, provider, projects)
-                return
             await self._run_research(job, provider, projects, resume=resume)
 
     async def _analyze_selected(self, job, provider, projects: ProjectRepository) -> None:
@@ -82,6 +73,7 @@ class ResearchWorkflowService:
         evidence = EvidenceRepository(database)
         research = ResearchDataRepository(database)
         transfer = TransferRepository(database)
+        traces = TraceRepository(database)
         document_service = self.app.state.document_service
         acquisitions = {item.paper_id: item for item in await transfer.list_acquisitions(job.project_id)}
         missing = False
@@ -136,6 +128,7 @@ class ResearchWorkflowService:
             research,
             WorkItemRepository(database),
             self.app.state.skill_registry,
+            traces,
         )
         analyses = await sessions.paper_analyses(job.project_id, selection["search_revision"])
         completed = {item.paper_id for item in analyses}
@@ -154,6 +147,7 @@ class ResearchWorkflowService:
                 linked,
                 project.goal,
                 selection["requirements"],
+                trace_id=f"job-{job.run_id}",
             )
             await sessions.save_paper_analysis(
                 job.project_id, selection["search_revision"], analysis
@@ -164,24 +158,6 @@ class ResearchWorkflowService:
             selection["requirements"], analyses,
         )
         await projects.complete(job.project_id, "analysis_review")
-
-    async def _resynthesize(self, job, provider, projects: ProjectRepository) -> None:
-        database = self.app.state.database
-        await ProposalRepository(database).delete_for_resynthesis(job.project_id)
-        result = await ResearchBuilder(
-            provider,
-            TransferRepository(database),
-            EvidenceRepository(database),
-            self.app.state.skill_registry,
-        ).run(AgentTask(
-            task_id=f"{job.run_id}:resynthesis",
-            project_id=job.project_id,
-            task_type="research_build",
-            objective="Rebuild research directions after optional evidence review",
-        ))
-        if result.status != "completed":
-            raise RuntimeError(result.summary)
-        await projects.wait(job.project_id, "transfer_approval")
 
     async def _analyze_pending_documents(self, project_id: str, provider) -> None:
         from app.documents.analysis import DocumentAnalysisPipeline
@@ -294,180 +270,3 @@ class ResearchWorkflowService:
             )
             raise
 
-    async def _continue_workflow(
-        self,
-        project_id,
-        run_id,
-        trace_id,
-        provider,
-        projects,
-        traces,
-        papers,
-        documents,
-        evidence,
-        transfer,
-        proposals,
-        artifact_repository,
-    ):
-        document_service = self.app.state.document_service
-        acquisitions = {
-            item.paper_id: item for item in await transfer.list_acquisitions(project_id)
-        }
-        downloader = OpenAccessDownloader(document_service.workspace.max_document_bytes)
-        for paper in papers:
-            if acquisitions.get(paper.id) and acquisitions[paper.id].status == "parsed":
-                continue
-            source_url, discovery_error = await _resolve_open_access_url(
-                self.literature, paper.metadata
-            )
-            acquisition = PaperAcquisition(
-                project_id=project_id,
-                paper_id=paper.id,
-                status="awaiting_upload",
-                source_url=source_url,
-                error=discovery_error,
-                updated_at=utc_now(),
-            )
-            if source_url:
-                try:
-                    await transfer.upsert_acquisition(
-                        acquisition.model_copy(update={"status": "downloading"})
-                    )
-                    content, final_url = await downloader.fetch(source_url)
-                    entry = document_service.workspace.import_pdf_bytes(
-                        project_id, f"{paper.id}.pdf", content
-                    )
-                    await self.app.state.document_capabilities.parse_document(
-                        project_id, entry.document_id, trace_id
-                    )
-                    linked = await documents.register(project_id, paper.id, entry)
-                    acquisition = acquisition.model_copy(update={
-                        "status": "parsed",
-                        "source_url": final_url,
-                        "document_id": linked.document_id,
-                        "updated_at": utc_now(),
-                    })
-                except Exception as exc:  # noqa: BLE001 - one unavailable PDF is recoverable
-                    acquisition = acquisition.model_copy(update={
-                        "status": "awaiting_upload",
-                        "error": str(exc)[:1_000],
-                        "updated_at": utc_now(),
-                    })
-            await transfer.upsert_acquisition(acquisition)
-
-        parsed = [
-            item for item in await transfer.list_acquisitions(project_id)
-            if item.status == "parsed" and item.document_id
-        ]
-        if not parsed:
-            await traces.append(
-                project_id, trace_id, "workflow_interrupt", success=True,
-                agent="coordinator", summary={"stage": "awaiting_documents"},
-            )
-            return await projects.wait(project_id, "awaiting_documents")
-
-        research = ResearchDataRepository(documents.database)
-        if (await research.analysis_profile(project_id)).get("mode") == "paper_assistant_v2":
-            from app.documents.analysis import DocumentAnalysisPipeline
-
-            pipeline = DocumentAnalysisPipeline(
-                document_service, documents, evidence, research, provider
-            )
-            for document in await research.pending_documents(project_id):
-                await pipeline.run(
-                    project_id, document["paper_id"], document["id"], document["sha256"]
-                )
-
-        cards = await transfer.list_method_cards(project_id)
-        if len(cards) < len(parsed):
-            analyst = MultimodalAnalyst(
-                provider,
-                document_service,
-                documents,
-                evidence,
-                transfer,
-                self.app.state.skill_registry,
-            )
-            analysis = await analyst.run(AgentTask(
-                task_id=f"{run_id}:analysis",
-                project_id=project_id,
-                task_type="multimodal_analysis",
-                objective="Extract evidence-grounded method cards",
-                context={"documents": [
-                    {"paper_id": item.paper_id, "document_id": item.document_id}
-                    for item in parsed
-                ]},
-            ))
-            await traces.append(
-                project_id, trace_id, "agent_return",
-                success=analysis.status == "completed", agent=analysis.agent,
-                summary={"status": analysis.status}, error=analysis.error,
-            )
-            if analysis.status != "completed":
-                raise RuntimeError(analysis.summary)
-
-        try:
-            candidates = await transfer.get_candidates(project_id)
-        except RecordNotFoundError:
-            built = await ResearchBuilder(
-                provider, transfer, evidence, self.app.state.skill_registry
-            ).run(AgentTask(
-                task_id=f"{run_id}:transfer",
-                project_id=project_id,
-                task_type="research_build",
-                objective="Create transfer and combination candidates",
-            ))
-            await traces.append(
-                project_id, trace_id, "agent_return", success=built.status == "completed",
-                agent=built.agent, summary={"status": built.status}, error=built.error,
-            )
-            if built.status != "completed":
-                raise RuntimeError(built.summary)
-            candidates = await transfer.get_candidates(project_id)
-        if candidates.status == "pending":
-            await traces.append(
-                project_id, trace_id, "workflow_interrupt", success=True,
-                agent="coordinator", summary={"stage": "transfer_approval"},
-            )
-            return await projects.wait(project_id, "transfer_approval")
-        if candidates.status == "rejected":
-            return await projects.complete(project_id, "transfer_rejected")
-
-        profile = await transfer.get_profile(project_id)
-        cards = await transfer.list_method_cards(project_id)
-        existing_artifacts = await artifact_repository.list_for_project(project_id)
-        if not any(item.name == "research-profile" for item in existing_artifacts):
-            await generate_transfer_artifacts(
-                self.app.state.artifact_capabilities, profile, cards, candidates
-            )
-        try:
-            await proposals.get(project_id)
-        except RecordNotFoundError:
-            evidence_ids = sorted({
-                evidence_id
-                for card in cards
-                for value in MultimodalAnalyst._fields(card)
-                for evidence_id in value.evidence_ids
-            })
-            objective = profile.problem_statement
-            if candidates.combinations:
-                objective += "\nAccepted direction: " + candidates.combinations[0].title
-            graph = build_experiment_graph(
-                ProposalBuilder(provider, evidence, self.app.state.skill_registry),
-                self.app.state.checkpointer,
-            )
-            result = await graph.ainvoke(
-                {
-                    "project_id": project_id,
-                    "objective": objective,
-                    "evidence_ids": evidence_ids,
-                    "proposal": None,
-                },
-                config={"configurable": {"thread_id": f"experiment:{project_id}"}},
-            )
-            await proposals.create(ExperimentProposal.model_validate(result["proposal"]))
-            await traces.append(
-                project_id, trace_id, "human_approval_interrupted", success=True,
-                agent="research_planner", summary={"stage": "experiment_approval"},
-            )
-        return await projects.wait(project_id, "experiment_approval")

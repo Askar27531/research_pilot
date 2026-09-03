@@ -111,7 +111,7 @@ def test_core_mutations_delegate_to_workspace_service() -> None:
     try:
         with TestClient(app) as client:
             action = client.post(
-                "/projects/project-1/actions", json={"type": "refresh_results"}
+                "/projects/project-1/actions", json={"type": "run"}
             )
             upload = client.post(
                 "/projects/project-1/documents",
@@ -121,7 +121,7 @@ def test_core_mutations_delegate_to_workspace_service() -> None:
             resource = client.get("/projects/project-1/resources/resource-token")
             deleted = client.delete("/projects/project-1")
         assert action.status_code == 200
-        assert service.action_type == ("project-1", "refresh_results")
+        assert service.action_type == ("project-1", "run")
         assert upload.status_code == 202
         assert service.uploaded == (
             "project-1", "opaque-upload-token", "paper.pdf", b"%PDF-demo"

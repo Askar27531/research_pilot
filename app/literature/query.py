@@ -8,20 +8,11 @@ async def generate_search_queries(
     provider: LLMProvider,
 ) -> tuple[SearchQueryPlan, list[str]]:
     warnings: list[str] = []
+    # 检索策略指令由 SkillAwareProvider 按 SearchQueryPlan 注入 systematic-search 技能，
+    # 本函数只提供输入；生成质量由技能约束，数量/覆盖等确定性校验见 _deduplicate_query_plan。
     try:
         plan = await provider.structured_output(
             [
-                {
-                    "role": "system",
-                    "content": (
-                        "Build a high-precision scholarly search strategy from the user's topic. "
-                        "Identify 2-5 required concept groups; each group contains synonyms and "
-                        "every included paper must match at least one term from every group. Add "
-                        "specific excluded topics that are commonly confused with the topic. "
-                        "Generate 3-5 English queries and make every query cover every required "
-                        "concept group. Do not generate broad application-only or metrics-only queries."
-                    ),
-                },
                 {
                     "role": "user",
                     "content": request.model_dump_json()

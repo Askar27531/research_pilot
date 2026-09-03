@@ -16,7 +16,7 @@ class ResearchDataRepository:
         request: ResearchRequest,
         profile_input: ResearchProfileInput,
     ) -> tuple[str, str]:
-        """Create the project, profile, v2 marker and first job in one transaction."""
+        """Create the project, profile and first job in one transaction."""
         project_id, profile_id, job_id = str(uuid4()), str(uuid4()), str(uuid4())
         now = utc_now()
         profile = ResearchProfile(
@@ -41,34 +41,12 @@ class ResearchDataRepository:
                 (profile_id, project_id, profile.model_dump_json(), now, now),
             )
             await connection.execute(
-                "INSERT INTO project_analysis_profiles(project_id,mode,created_at,updated_at) "
-                "VALUES(?,'paper_assistant_v2',?,?)",
-                (project_id, now, now),
-            )
-            await connection.execute(
                 "INSERT INTO workflow_jobs(id,project_id,run_id,status,attempts,created_at,"
                 "updated_at,job_type) VALUES(?,?,?,'queued',0,?,?,'research')",
                 (job_id, project_id, f"workspace:{job_id}", now, now),
             )
             await connection.commit()
         return project_id, job_id
-
-    async def set_analysis_mode(self, project_id: str, mode: str) -> None:
-        now = utc_now()
-        async with self.database.connect() as connection:
-            await connection.execute(
-                "INSERT INTO project_analysis_profiles(project_id,mode,created_at,updated_at) "
-                "VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET mode=excluded.mode,updated_at=excluded.updated_at",
-                (project_id, mode, now, now),
-            )
-            await connection.commit()
-
-    async def analysis_profile(self, project_id: str) -> dict:
-        async with self.database.connect() as connection:
-            row = await (await connection.execute(
-                "SELECT * FROM project_analysis_profiles WHERE project_id=?", (project_id,)
-            )).fetchone()
-        return dict(row) if row else {"mode": "legacy", "outputs_stale": 0}
 
     async def review_evidence(self, project_id: str, evidence_id: str,
                               status: str, note: str | None) -> None:
@@ -85,10 +63,6 @@ class ResearchDataRepository:
                 "status=excluded.status,note=excluded.note,updated_at=excluded.updated_at",
                 (evidence_id, project_id, status, note, now),
             )
-            await connection.execute(
-                "UPDATE project_analysis_profiles SET outputs_stale=1,updated_at=? WHERE project_id=?",
-                (now, project_id),
-            )
             await connection.commit()
 
     async def review_counts(self, project_id: str) -> dict[str, int]:
@@ -100,14 +74,6 @@ class ResearchDataRepository:
         result = {"unreviewed": 0, "confirmed": 0, "doubted": 0, "excluded": 0}
         result.update({row["status"]: row["count"] for row in rows})
         return result
-
-    async def mark_outputs_fresh(self, project_id: str) -> None:
-        async with self.database.connect() as connection:
-            await connection.execute(
-                "UPDATE project_analysis_profiles SET outputs_stale=0,updated_at=? WHERE project_id=?",
-                (utc_now(), project_id),
-            )
-            await connection.commit()
 
     async def save_search(self, project_id: str, query: str, sources: list[str],
                           result_count: int, warnings: list[str], latency_ms: int) -> None:

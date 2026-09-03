@@ -36,25 +36,7 @@
       "enabled": true,
       "timeout_seconds": 300,
       "capabilities": {
-        "paper.ingest": {"tool": "submit_paper", "priority": 20},
-        "paper.parse": {"tool": "parse_document", "priority": 20},
-        "paper.analyze": {"tool": "start_paper_analysis", "priority": 20},
-        "paper.structure": {"tool": "get_paper_structure", "priority": 20},
-        "paper.evidence": {"tool": "get_paper_evidence", "priority": 20},
-        "paper.method_card": {"tool": "get_method_card", "priority": 20},
-        "paper.summary": {"tool": "get_paper_summary", "priority": 20}
-      }
-    },
-    {
-      "id": "researchpilot-artifact",
-      "source": "researchpilot",
-      "transport": "inprocess",
-      "enabled": true,
-      "timeout_seconds": 60,
-      "capabilities": {
-        "artifact.markdown": {"tool": "create_markdown", "priority": 20},
-        "artifact.csv": {"tool": "create_csv", "priority": 20},
-        "artifact.mermaid": {"tool": "create_mermaid", "priority": 20}
+        "paper.parse": {"tool": "parse_document", "priority": 20}
       }
     }
   ]

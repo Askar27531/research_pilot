@@ -1,9 +1,9 @@
 from uuid import uuid4
 
 from app.db.database import Database
-from app.db.errors import ProjectConflictError, RecordNotFoundError
+from app.db.errors import RecordNotFoundError
 from app.db.repositories import dump_json, load_json, utc_now
-from app.schemas import RevisionPreview, WorkflowJob
+from app.schemas import WorkflowJob
 
 
 class WorkflowJobRepository:
@@ -159,53 +159,4 @@ class WorkflowJobRepository:
         return WorkflowJob(job_id=row["id"], project_id=row["project_id"], run_id=row["run_id"],
             status=row["status"], job_type=dict(row).get("job_type", "research"),
             attempts=row["attempts"], error=load_json(row["error_json"]),
-            created_at=row["created_at"], updated_at=row["updated_at"])
-
-
-class RevisionPreviewRepository:
-    def __init__(self, database: Database) -> None:
-        self.database = database
-
-    async def create(self, project_id: str, target: str, base_version: int,
-                     instruction: str, summary: str, patch: dict) -> RevisionPreview:
-        now = utc_now()
-        preview = RevisionPreview(preview_id=str(uuid4()), project_id=project_id,
-            target=target, base_version=base_version, instruction=instruction,
-            summary=summary, patch=patch, status="pending", created_at=now, updated_at=now)
-        async with self.database.connect() as connection:
-            await connection.execute(
-                "INSERT INTO revision_previews(id,project_id,target,base_version,instruction,"
-                "summary,patch_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'pending',?,?)",
-                (preview.preview_id, project_id, target, base_version, instruction, summary,
-                 dump_json(patch), now, now),
-            )
-            await connection.commit()
-        return preview
-
-    async def get(self, preview_id: str) -> RevisionPreview:
-        async with self.database.connect() as connection:
-            row = await (await connection.execute(
-                "SELECT * FROM revision_previews WHERE id=?", (preview_id,)
-            )).fetchone()
-        if row is None:
-            raise RecordNotFoundError(f"Revision preview not found: {preview_id}")
-        return self._to_preview(row)
-
-    async def mark_applied(self, preview_id: str) -> RevisionPreview:
-        async with self.database.connect() as connection:
-            cursor = await connection.execute(
-                "UPDATE revision_previews SET status='applied',updated_at=? "
-                "WHERE id=? AND status='pending'", (utc_now(), preview_id),
-            )
-            if cursor.rowcount == 0:
-                await connection.rollback()
-                raise ProjectConflictError("Revision preview is no longer pending")
-            await connection.commit()
-        return await self.get(preview_id)
-
-    @staticmethod
-    def _to_preview(row) -> RevisionPreview:
-        return RevisionPreview(preview_id=row["id"], project_id=row["project_id"],
-            target=row["target"], base_version=row["base_version"], instruction=row["instruction"],
-            summary=row["summary"], patch=load_json(row["patch_json"]), status=row["status"],
             created_at=row["created_at"], updated_at=row["updated_at"])

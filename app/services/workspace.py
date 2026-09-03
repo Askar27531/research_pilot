@@ -1,25 +1,16 @@
 import asyncio
 import hashlib
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from langgraph.types import Command
-
-from app.agents import ResearchBuilder
 from app.api.tokens import issue_token, read_token
-from app.artifacts import ArtifactService, generate_experiment_artifacts
 from app.db import (
-    ArtifactRepository,
     DocumentRepository,
     EvidenceRepository,
     PaperRepository,
     ProjectRepository,
-    ProposalRepository,
     ResearchDataRepository,
     ResearchSessionRepository,
-    RevisionPreviewRepository,
     SummaryRepository,
-    TraceRepository,
     TransferRepository,
     WorkflowJobRepository,
     WorkItemRepository,
@@ -28,31 +19,20 @@ from app.db.errors import ProjectConflictError, RecordNotFoundError
 from app.db.repositories import utc_now
 from app.documents import DocumentValidationError
 from app.evidence import EvidenceVerifier
-from app.experiments import ProposalBuilder, build_experiment_graph
-from app.llm import OllamaProvider
 from app.schemas import (
-    AgentTask,
-    ExperimentProposal,
-    ExperimentRevisionDraft,
     PaperAcquisition,
     ProjectSummary,
     ProjectWorkspace,
-    ProposalDecision,
     ResearchProfileInput,
     ResearchRequest,
-    TransferCandidateSet,
-    TransferDecision,
     WorkspaceActionRequest,
     WorkspaceMutationResult,
     WorkspaceProjectCreate,
     WorkspaceProjectUpdate,
 )
 from app.schemas.workspace import (
-    DownloadAction,
     MissingDocument,
     RetryAction,
-    ReviewDirectionAction,
-    ReviewExperimentAction,
     UploadDocumentsAction,
     WaitAction,
     WorkspaceProgress,
@@ -94,16 +74,12 @@ class WorkspaceService:
         self.projects = ProjectRepository(database)
         self.papers = PaperRepository(database)
         self.transfers = TransferRepository(database)
-        self.proposals = ProposalRepository(database)
-        self.artifacts = ArtifactRepository(database)
         self.items = WorkItemRepository(database)
         self.jobs = WorkflowJobRepository(database)
         self.evidence = EvidenceRepository(database)
         self.summaries = SummaryRepository(database)
         self.research = ResearchDataRepository(database)
         self.sessions = ResearchSessionRepository(database)
-        self.previews = RevisionPreviewRepository(database)
-        self.traces = TraceRepository(database)
         self.documents = DocumentRepository(database)
         self.document_service = app.state.document_service
 
@@ -135,18 +111,6 @@ class WorkspaceService:
             ),
             "awaiting_documents": (
                 "documents_needed", "需要补充全文", "部分关键论文需要上传 PDF。"
-            ),
-            "transfer_approval": (
-                "direction_review", "请审阅研究方向", "已形成证据支持的研究建议。"
-            ),
-            "experiment_design": (
-                "researching", "正在生成研究方案", "正在将方向转化为实验计划。"
-            ),
-            "experiment_approval": (
-                "experiment_review", "请确认研究方案", "计划已准备好，不会执行实验。"
-            ),
-            "human_approval": (
-                "experiment_review", "请确认研究方案", "计划已准备好，不会执行实验。"
             ),
         }
         if project.current_stage in mapping:
@@ -253,27 +217,19 @@ class WorkspaceService:
             project,
             job,
             metrics,
-            direction,
-            experiment,
             records,
             acquisition_list,
-            profile,
             research_profile,
             analysis_metrics,
-            artifact_records,
             review_counts,
         ) = await asyncio.gather(
             self.projects.get(project_id),
             self.jobs.latest_for_project(project_id),
             self.items.metrics(project_id),
-            _optional(self.transfers.get_candidates(project_id)),
-            _optional(self.proposals.get(project_id)),
             self.papers.list_for_project(project_id),
             self.transfers.list_acquisitions(project_id),
-            self.research.analysis_profile(project_id),
             self.transfers.get_profile(project_id),
             self.research.analysis_metrics(project_id),
-            self.artifacts.list_for_project(project_id),
             self.research.review_counts(project_id),
         )
         user_stage, label, detail = self.stage(project, job)
@@ -288,12 +244,6 @@ class WorkspaceService:
             project_id, paper_token, records, acquisitions
         ) if paper_token else None
         next_action = self._next_action(project_id, user_stage, detail, records, acquisitions)
-        resources = [{
-            "name": value.name,
-            "type": value.artifact_type,
-            "version": value.version,
-            "url": self._resource_url(project_id, "artifact", value.artifact_id),
-        } for value in artifact_records]
         return ProjectWorkspace(
             project_id=project.id,
             name=project.name,
@@ -317,9 +267,6 @@ class WorkspaceService:
                     if analysis_metrics["current_step"] else None
                 ),
             ),
-            direction=direction,
-            experiment=experiment,
-            artifacts=[],
             literature=literature,
             selected_paper=selected_paper,
             search_plan=search.get("plan") if search else None,
@@ -331,14 +278,11 @@ class WorkspaceService:
             analysis_requirements=(selection or {}).get("requirements"),
             analysis_report=await self._report_payload(project_id, report) if report else None,
             evidence_review=review_counts,
-            output_freshness="stale" if profile.get("outputs_stale") else "fresh",
-            resources=resources,
             diagnostics={
                 "project_status": project.status,
                 "current_stage": project.current_stage,
                 "project_version": project.version,
                 "job": job.model_dump(mode="json") if job else None,
-                "analysis_mode": profile.get("mode", "legacy"),
             },
             project_input={
                 "project_name": project.name,
@@ -496,18 +440,12 @@ class WorkspaceService:
                 if paper.id in acquisitions
                 and acquisitions[paper.id].status == "awaiting_upload"
             ])
-        if stage == "direction_review":
-            return ReviewDirectionAction()
-        if stage == "experiment_review":
-            return ReviewExperimentAction()
         if stage == "failed":
             return RetryAction(reason=detail)
-        if stage == "completed":
-            return DownloadAction()
         return WaitAction(job_id=None)
 
     async def action(self, project_id: str, action: WorkspaceActionRequest) -> WorkspaceMutationResult:
-        message, job, preview = "操作已完成", None, None
+        message, job = "操作已完成", None
         if action.type == "run":
             job_type = "document_analysis" if await self.sessions.selection(project_id) else "research"
             job = await self.jobs.enqueue(project_id, job_type)
@@ -562,185 +500,17 @@ class WorkspaceService:
             job = await self.jobs.enqueue(project_id, "document_analysis")
             self.app.state.workflow_worker.wake()
             message = "正在基于已有全文和证据重新生成详细分析"
-        elif action.type == "direction_decision":
-            await self._decide_direction(project_id, action.decision)
-            message = ("已采用研究方向，正在生成研究方案"
-                       if action.decision == "accept" else "项目已结束")
-        elif action.type == "direction_revision_preview":
-            value = await self._preview_direction(project_id, action.instruction)
-            preview = self._preview_payload(project_id, value)
-            message = "调整预览已生成，确认后才会应用"
-        elif action.type == "direction_revision_apply":
-            await self._apply_direction(project_id, action.preview_token)
-            message = "研究方向调整已应用"
-        elif action.type == "plan_decision":
-            await self._decide_plan(project_id, action.decision)
-            if action.decision == "accept":
-                await self.research.mark_outputs_fresh(project_id)
-            message = ("研究方案已确认并生成材料"
-                       if action.decision == "accept" else "项目已结束")
-        elif action.type == "plan_revision_preview":
-            value = await self._preview_plan(project_id, action.instruction)
-            preview = self._preview_payload(project_id, value)
-            message = "方案调整预览已生成，确认后才会应用"
-        elif action.type == "plan_revision_apply":
-            await self._apply_plan(project_id, action.preview_token)
-            await self.research.mark_outputs_fresh(project_id)
-            message = "方案调整已应用并生成材料"
         elif action.type == "evidence_review":
             evidence_id = read_token(action.evidence_token, project_id, "evidence")["i"]
             await self.research.review_evidence(
                 project_id, evidence_id, action.status, action.note
             )
             message = "证据复核状态已保存"
-        elif action.type == "refresh_results":
-            job = await self.jobs.enqueue(project_id, "resynthesis")
-            self.app.state.workflow_worker.wake()
-            message = "正在根据复核结果更新研究材料"
         return WorkspaceMutationResult(
             message=message,
             workspace=await self.workspace(project_id),
             job=job,
-            preview=preview,
         )
-
-    async def _decide_direction(self, project_id: str, decision: str) -> None:
-        current = await self.transfers.get_candidates(project_id)
-        await self.transfers.decide_candidates(
-            project_id, TransferDecision(action=decision, revision=current.revision)
-        )
-        if decision == "reject":
-            await self.projects.complete(project_id, "transfer_rejected")
-        else:
-            await self.projects.wait(project_id, "experiment_design")
-            await self.jobs.enqueue(project_id)
-            self.app.state.workflow_worker.wake()
-
-    @asynccontextmanager
-    async def _provider(self):
-        async with OllamaProvider() as provider:
-            yield provider
-
-    async def _preview_direction(self, project_id: str, instruction: str):
-        current = await self.transfers.get_candidates(project_id)
-        async with self._provider() as provider:
-            result = await ResearchBuilder(
-                provider, self.transfers, self.evidence, self.app.state.skill_registry
-            ).run(AgentTask(
-                task_id=f"preview:{project_id}",
-                project_id=project_id,
-                task_type="research_build",
-                objective="Preview revised transfer candidates",
-                context={"feedback": instruction, "persist": False},
-            ))
-        if result.status != "completed":
-            raise ValueError(result.summary)
-        candidate = TransferCandidateSet.model_validate(result.output["transfer_candidates"])
-        titles = [value.title for value in candidate.combinations[:3]]
-        return await self.previews.create(
-            project_id,
-            "transfer",
-            current.revision,
-            instruction,
-            "；".join(titles) if titles else "已重新评估研究方向",
-            candidate.model_dump(mode="json"),
-        )
-
-    async def _apply_direction(self, project_id: str, token: str) -> None:
-        preview = await self.previews.get(read_token(token, project_id, "preview")["i"])
-        if preview.project_id != project_id or preview.target != "transfer":
-            raise RecordNotFoundError("Transfer revision preview not found")
-        current = await self.transfers.get_candidates(project_id)
-        if preview.status != "pending" or current.revision != preview.base_version:
-            raise ProjectConflictError("Transfer candidates changed; create a new preview")
-        await self.transfers.save_candidates(TransferCandidateSet.model_validate(preview.patch))
-        await self.previews.mark_applied(preview.preview_id)
-
-    async def _decide_plan(self, project_id: str, decision: str, *, updates=None,
-                           feedback: str | None = None) -> ExperimentProposal:
-        current = await self.proposals.get(project_id)
-        value = ProposalDecision(
-            action="modify" if updates is not None else decision,
-            version=current.version,
-            feedback=feedback,
-            experiment_updates=updates or [],
-        )
-        async with self._provider() as provider:
-            graph = build_experiment_graph(
-                ProposalBuilder(provider, self.evidence, self.app.state.skill_registry),
-                self.app.state.checkpointer,
-            )
-            result = await graph.ainvoke(
-                Command(resume=value.model_dump(mode="json")),
-                config={"configurable": {"thread_id": f"experiment:{project_id}"}},
-            )
-        saved = await self.proposals.decide(
-            project_id, value, ExperimentProposal.model_validate(result["proposal"])
-        )
-        if saved.status in {"accepted", "modified"}:
-            await generate_experiment_artifacts(
-                ArtifactService(self.document_service.workspace, self.artifacts), saved
-            )
-        await self.projects.complete(project_id, f"proposal_{saved.status}")
-        await self.traces.append(
-            project_id,
-            saved.proposal_id,
-            "human_approval_resumed",
-            success=True,
-            agent="research_planner",
-            summary={"action": value.action, "from_version": value.version},
-        )
-        return saved
-
-    async def _preview_plan(self, project_id: str, instruction: str):
-        current = await self.proposals.get(project_id)
-        async with self._provider() as provider:
-            draft = await provider.structured_output([
-                {"role": "system", "content": (
-                    "Translate the user's experiment revision into the smallest valid structured "
-                    "update. Only reference experiment IDs in the current proposal. "
-                    "Do not change unspecified fields."
-                )},
-                {"role": "user", "content": (
-                    f"CURRENT PROPOSAL:\n{current.model_dump_json()}\n"
-                    f"USER REQUEST:\n{instruction}"
-                )},
-            ], ExperimentRevisionDraft)
-        known_ids = {item.experiment_id for item in current.experiments}
-        if any(item.experiment_id not in known_ids for item in draft.experiment_updates):
-            raise ValueError("Experiment revision references an unknown experiment")
-        return await self.previews.create(
-            project_id,
-            "experiment",
-            current.version,
-            instruction,
-            draft.summary,
-            {"experiment_updates": [value.model_dump(mode="json")
-                                    for value in draft.experiment_updates]},
-        )
-
-    async def _apply_plan(self, project_id: str, token: str) -> None:
-        preview = await self.previews.get(read_token(token, project_id, "preview")["i"])
-        if preview.project_id != project_id or preview.target != "experiment":
-            raise RecordNotFoundError("Experiment revision preview not found")
-        current = await self.proposals.get(project_id)
-        if preview.status != "pending" or current.version != preview.base_version:
-            raise ProjectConflictError("Experiment proposal changed; create a new preview")
-        await self._decide_plan(
-            project_id,
-            "modify",
-            updates=preview.patch["experiment_updates"],
-            feedback=preview.instruction,
-        )
-        await self.previews.mark_applied(preview.preview_id)
-
-    @staticmethod
-    def _preview_payload(project_id, preview) -> dict:
-        return {
-            "preview_token": issue_token(project_id, "preview", preview.preview_id),
-            "summary": preview.summary,
-            "patch": preview.patch,
-        }
 
     @property
     def max_upload_bytes(self) -> int:
@@ -771,14 +541,6 @@ class WorkspaceService:
 
     async def resource(self, project_id: str, token: str) -> WorkspaceResource:
         payload = read_token(token, project_id)
-        if payload["k"] == "artifact":
-            record = await self.artifacts.get(project_id, payload["i"])
-            content = await ArtifactService(
-                self.document_service.workspace, self.artifacts
-            ).read(record)
-            media = {"markdown": "text/markdown", "csv": "text/csv",
-                     "mermaid": "text/plain"}[record.artifact_type]
-            return WorkspaceResource(content, media, record.name)
         if payload["k"] == "evidence":
             node = await self.evidence.get(project_id, payload["i"])
             preview = EvidenceVerifier(self.document_service).verify(node)

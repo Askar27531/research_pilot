@@ -14,6 +14,7 @@ from app.db import (
     EvidenceRepository,
     ResearchDataRepository,
     ResearchSessionRepository,
+    TraceRepository,
     WorkItemRepository,
 )
 from app.documents import DocumentService
@@ -157,6 +158,7 @@ class PaperAnalyst:
         research: ResearchDataRepository,
         work_items: WorkItemRepository,
         skills: SkillRegistry,
+        traces: TraceRepository | None = None,
         settings: Settings | None = None,
     ) -> None:
         self.provider = provider
@@ -166,6 +168,7 @@ class PaperAnalyst:
         self.research = research
         self.work_items = work_items
         self.skills = skills
+        self.traces = traces
         self.settings = settings or get_settings()
 
     async def run(
@@ -176,6 +179,7 @@ class PaperAnalyst:
         linked,
         topic: str,
         requirements: str | None,
+        trace_id: str | None = None,
     ) -> PaperAnalysis:
         pipeline = DocumentAnalysisPipeline(
             self.documents, self.document_repository, self.evidence, self.research, self.provider
@@ -191,6 +195,15 @@ class PaperAnalyst:
         visual_nodes = [item for item in all_evidence if item.evidence_type != "text"]
         allowed = {item.evidence_id for item in [*text_nodes, *visual_nodes]}
         method_skill = self.skills.load_skill("method-mechanism-extraction")
+        if self.traces is not None:
+            await self.traces.append(
+                project_id,
+                trace_id or f"paper-analysis:{project_id}",
+                "skill_load",
+                success=True,
+                agent=self.name,
+                summary={"name": method_skill.name, "version": method_skill.version},
+            )
 
         fingerprint = hashlib.sha256(json.dumps({
             "version": ANALYSIS_PIPELINE_VERSION,
@@ -223,6 +236,7 @@ class PaperAnalyst:
         draft = PaperAnalysis(
             paper_id=paper.id,
             title=paper.metadata.title,
+            skill_versions={"method-mechanism-extraction": method_skill.version},
             overview=None,
             core_problem=drafts["problem"].core_problem,
             methods=drafts["method"].methods,
@@ -278,12 +292,16 @@ class PaperAnalyst:
     ) -> BaseModel:
         selected = self._select_evidence(spec, text_nodes, visual_nodes, topic)
         evidence_json = json.dumps([self._compact(item) for item in selected], ensure_ascii=False)
-        system = (
+        base = (
             "你是严谨的论文精读专家。请使用简体中文输出详细、可教学的分析。每个栏目给出 2-5 条"
             "实质性论述，每条用 2-3 个完整句子说明论文做了什么、如何实现、为什么重要。"
             "论文明确陈述的事实必须使用 kind=supported 并仅引用所给 evidence_id；分析性判断使用"
             " kind=inference 且 evidence_ids 为空。不要把摘要换一种说法，也不要虚构未报告的数值。"
-            + (f"\n\n必须遵循以下方法机制提取规范：\n{skill_content}" if skill_content else "")
+        )
+        # 技能正文优先作为 system 首段（与检索路径的注入位置一致），其余提示降级为补充。
+        system = (
+            f"Apply this workflow skill:\n\n{skill_content}\n\n{base}"
+            if skill_content else base
         )
         messages = [
             {"role": "system", "content": system},

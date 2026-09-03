@@ -15,7 +15,6 @@ from app.schemas import (
     AgentResult,
     AgentTask,
     Handoff,
-    PaperScreeningBatch,
     ResearchRequest,
     ResearchUnderstanding,
     SearchQuery,
@@ -23,6 +22,7 @@ from app.schemas import (
     SearchResult,
 )
 from app.skills import SkillRegistry
+from app.skills.bindings import SKILL_FOR_RESPONSE_MODEL
 
 
 class TracedLiteratureClient:
@@ -163,11 +163,7 @@ class SkillAwareProvider(LLMProvider):
         messages: Sequence[dict[str, str]],
         response_model: type[BaseModel],
     ) -> BaseModel:
-        mapping = {
-            SearchQueryPlan: "systematic-search",
-            PaperScreeningBatch: "paper-screening",
-        }
-        skill_name = mapping.get(response_model)
+        skill_name = SKILL_FOR_RESPONSE_MODEL.get(response_model)
         effective_messages = list(messages)
         if skill_name is not None:
             skill = await self._load(skill_name)

@@ -54,6 +54,8 @@ class PaperOverviewDraft(BaseModel):
 class PaperAnalysis(PaperAnalysisDraft):
     paper_id: str
     title: str
+    # 生成该分析时实际加载的工作流技能及其版本，便于对照不同技能版本的输出差异。
+    skill_versions: dict[str, str] = Field(default_factory=dict)
 
 
 class ComparisonDraft(BaseModel):

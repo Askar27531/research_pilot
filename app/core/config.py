@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     openalex_timeout_seconds: float = Field(default=30, gt=0)
     openalex_max_attempts: int = Field(default=3, ge=1, le=5)
     openalex_backoff_seconds: float = Field(default=0.5, ge=0, le=10)
-    crossref_base_url: str = "https://api.crossref.org/v1"
+    crossref_base_url: str = "https://api.crossref.org"
     arxiv_base_url: str = "https://export.arxiv.org/api/query"
     literature_timeout_seconds: float = Field(default=30, gt=0)
     literature_cache_ttl_seconds: float = Field(default=900, gt=0)

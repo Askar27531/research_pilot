@@ -27,9 +27,12 @@ logger = logging.getLogger(__name__)
 
 
 class PDFParser:
-    def __init__(self, workspace: WorkspaceManager, *, render_dpi: int = 144) -> None:
+    def __init__(
+        self, workspace: WorkspaceManager, *, render_dpi: int = 144, ocr_languages: str = "eng"
+    ) -> None:
         self.workspace = workspace
         self.render_dpi = render_dpi
+        self.ocr_languages = ocr_languages
 
     def parse(self, project_id: str, document_id: str) -> ParsedDocument:
         entry = self.workspace.get_document(project_id, document_id)
@@ -53,7 +56,7 @@ class PDFParser:
                     if len(text.strip()) < 40:
                         try:
                             text_page = page.get_textpage_ocr(
-                                language="eng", dpi=self.render_dpi, full=False
+                                language=self.ocr_languages, dpi=self.render_dpi, full=False
                             )
                             text = page.get_text("text", textpage=text_page, sort=True)
                         except Exception as exc:  # noqa: BLE001 - vision handles scan fallback

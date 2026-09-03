@@ -64,7 +64,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.workspace_root, max_document_bytes=settings.document_max_bytes
     )
     app.state.document_service = DocumentService(
-        workspace, PDFParser(workspace, render_dpi=settings.pdf_render_dpi)
+        workspace, PDFParser(
+            workspace,
+            render_dpi=settings.pdf_render_dpi,
+            ocr_languages=settings.ocr_languages,
+        )
     )
     artifact_service = ArtifactService(workspace, ArtifactRepository(database))
     registry = MCPRegistry.load(settings.mcp_config_path, {

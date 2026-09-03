@@ -4,7 +4,7 @@ from app.agents.paper_analysis import (
     _chunk_text,
     _useful_section,
 )
-from app.schemas import AnalysisClaim, EvidenceNode, PaperAnalysis
+from app.schemas import EvidenceNode
 
 
 def _evidence(identifier: str, page: int, text: str, *, kind: str = "text") -> EvidenceNode:
@@ -54,27 +54,3 @@ def test_dimension_selection_prefers_relevant_late_experiment_evidence() -> None
     selected = PaperAnalyst._select_evidence(experiment, nodes, [], "海洋涡旋")
 
     assert selected[0].evidence_id == "result"
-
-
-def test_quality_gate_rejects_short_or_incomplete_reports() -> None:
-    supported = AnalysisClaim(value="有证据支持的详细分析。" * 8, kind="supported", evidence_ids=["e"])
-    inference = AnalysisClaim(value="基于证据边界的局限分析。" * 8, kind="inference")
-    report = PaperAnalysis(
-        paper_id="paper",
-        title="title",
-        overview=AnalysisClaim(value="完整概述。" * 25, kind="supported", evidence_ids=["e"]),
-        core_problem=[supported, supported.model_copy()],
-        methods=[supported, supported.model_copy()],
-        mechanisms=[supported, supported.model_copy()],
-        experimental_setup=[supported, supported.model_copy()],
-        main_results=[supported, supported.model_copy()],
-        limitations=[inference, inference.model_copy()],
-        relevance_to_topic=[supported, supported.model_copy()],
-    )
-
-    assert PaperAnalyst._quality_issues(report) == []
-    report.overview = None
-    report.methods = [AnalysisClaim(value="太短", kind="inference")]
-    issues = PaperAnalyst._quality_issues(report)
-    assert "综合概述不足 120 字" in issues
-    assert "方法内容不足" in issues

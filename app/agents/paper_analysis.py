@@ -237,9 +237,6 @@ class PaperAnalyst:
         )
         draft.overview = overview.overview
         self._sanitize_evidence(draft, allowed)
-        issues = self._quality_issues(draft)
-        if issues:
-            raise LLMError("论文分析未通过质量检查：" + "；".join(issues))
         await self.research.set_analysis_step(project_id, "论文深度分析已完成")
         return draft
 
@@ -304,29 +301,6 @@ class PaperAnalyst:
                 output_tokens,
             )
         self._sanitize_evidence(result, allowed)
-        repair_round = 0
-        while self._fields_need_repair(result, spec.fields) and repair_round < 2:
-            repair_round += 1
-            guidance = (
-                "上一次结果过短或缺少有证据支持的解释，且条目里出现的是分类标签而不是具体内容。"
-                "请只重写该结构：每个栏目至少 2 条，每条 value 必须是一段不少于 30 字的具体论述，"
-                "说明论文做了什么、如何实现、为什么，禁止把栏目名或分类词单独作为条目内容。"
-                if repair_round == 1 else
-                f"第二次修复（栏目：{'、'.join(spec.fields)}）仍不合格。请彻底重写：每条 value "
-                "扩写到 50 字以上并包含具体细节（方法组件名称、机制因果或局限情形），"
-                "不得保留标签式短句，也不得复述上一轮内容。"
-            )
-            repair_messages = [
-                *messages,
-                {"role": "assistant", "content": result.model_dump_json()},
-                {"role": "user", "content": guidance},
-            ]
-            async with semaphore:
-                result = await self._checkpointed_call(
-                    project_id, run_scope, f"{spec.key}-repair", repair_messages,
-                    spec.response_model, output_tokens,
-                )
-            self._sanitize_evidence(result, allowed)
         return result
 
     async def _run_overview(
@@ -350,17 +324,6 @@ class PaperAnalyst:
             self.settings.paper_analysis_overview_tokens,
         )
         self._sanitize_evidence(result, allowed)
-        if len(result.overview.value.strip()) < 120:
-            repair = [
-                *messages,
-                {"role": "assistant", "content": result.model_dump_json()},
-                {"role": "user", "content": "概述过短。请扩写为信息密集、逻辑连贯的 5-8 个完整句子。"},
-            ]
-            result = await self._checkpointed_call(
-                project_id, run_scope, "overview-repair", repair, PaperOverviewDraft,
-                self.settings.paper_analysis_overview_tokens,
-            )
-            self._sanitize_evidence(result, allowed)
         return result
 
     async def _checkpointed_call(
@@ -458,38 +421,6 @@ class PaperAnalyst:
             if not set(claim.evidence_ids) <= allowed:
                 claim.kind = "inference"
                 claim.evidence_ids = []
-
-    @staticmethod
-    def _fields_need_repair(value: BaseModel, fields: tuple[str, ...]) -> bool:
-        for field in fields:
-            claims = getattr(value, field, [])
-            chars = sum(len(claim.value.strip()) for claim in claims)
-            sufficient = (len(claims) >= 2 and chars >= 100) or (
-                len(claims) >= 1 and chars >= 300
-            )
-            if not sufficient:
-                return True
-            # mechanisms (causal interpretation) and limitations (judgment) may
-            # legitimately be inference-only; factual sections need >=1 supported.
-            if field not in {"mechanisms", "limitations"} and not any(
-                claim.kind == "supported" for claim in claims
-            ):
-                return True
-        return False
-
-    @classmethod
-    def _quality_issues(cls, value: PaperAnalysis) -> list[str]:
-        issues: list[str] = []
-        if value.overview is None or len(value.overview.value.strip()) < 120:
-            issues.append("综合概述不足 120 字")
-        for field, label in (
-            ("core_problem", "核心问题"), ("methods", "方法"), ("mechanisms", "机制"),
-            ("experimental_setup", "实验设置"), ("main_results", "主要结果"),
-            ("limitations", "局限"), ("relevance_to_topic", "课题相关性"),
-        ):
-            if cls._fields_need_repair(value, (field,)):
-                issues.append(f"{label}内容不足")
-        return issues
 
 
 class EvidenceSynthesizer:

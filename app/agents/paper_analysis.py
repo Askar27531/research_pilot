@@ -107,7 +107,10 @@ SPECIALISTS = (
         ("摘要", "引言", "背景", "问题", "目的", "挑战", "贡献", "abstract", "introduction",
          "problem", "challenge", "objective", "contribution", "propose"),
         7, 0,
-        "说明研究背景、现有方法缺口、论文要解决的精确问题、主要贡献及其与用户课题的联系。",
+        "说明研究背景、现有方法缺口、论文要解决的精确问题、主要贡献及其与用户课题的联系。"
+        "每一条 value 必须是一句完整的具体论述（建议 2 个完整句子以上）；严禁把『研究背景』"
+        "『现有方法缺口』『精确问题』『主要贡献』『课题联系』等栏目/类别词单独当作条目内容，"
+        "也不要复述『用户课题』『用户分析要求』等输入行。",
     ),
     _SpecialistSpec(
         "method", "方法与作用机制", ("methods", "mechanisms"), MethodAnalysisDraft,

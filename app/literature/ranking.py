@@ -117,35 +117,41 @@ async def rank_papers(
         except (LLMError, ValueError) as exc:
             warnings.append(f"LLM screening fallback: {exc}")
 
-    weight_sum = config.ranking_lexical_weight + config.ranking_llm_weight
-    lexical_weight = config.ranking_lexical_weight / weight_sum if weight_sum else 1.0
-    llm_weight = config.ranking_llm_weight / weight_sum if weight_sum else 0.0
-    ranked: list[RankedPaper] = []
+    # 语义相关优先：被 LLM 判定 include 的论文按语义相关分降序排在最前；
+    # 未进入精筛名单（词法 Top-N 之外）的论文作为词法兜底排在其后。
+    judged: list[tuple[float, float, PaperMetadata, str, list[str]]] = []
+    fallback: list[tuple[float, PaperMetadata]] = []
     for paper, lexical_value in lexical:
         llm = llm_scores.get(paper.stable_id)
-        if llm:
-            if not llm[0]:
-                continue
-            final = lexical_weight * lexical_value + llm_weight * llm[1]
-            reason = llm[2]
-            aspects = llm[3]
-            llm_value = llm[1]
+        if llm is not None and not llm[0]:
+            continue
+        if llm is not None:
+            judged.append((llm[1], lexical_value, paper, llm[2], llm[3]))
         else:
-            final = lexical_value
-            reason = "Ranked by deterministic title, abstract, keyword, and recency overlap"
-            aspects = sorted(tokens(request.research_question) & tokens(paper.title))
-            llm_value = None
-        ranked.append(
-            RankedPaper(
-                paper=paper,
-                lexical_score=lexical_value,
-                llm_score=llm_value,
-                final_score=round(min(1.0, max(0.0, final)), 6),
-                selection_reason=reason,
-                matched_aspects=aspects,
-            )
-        )
-    ranked.sort(key=lambda item: (-item.final_score, item.paper.stable_id))
+            fallback.append((lexical_value, paper))
+    judged.sort(key=lambda item: (-item[0], -item[1], item[2].stable_id))
+    fallback.sort(key=lambda item: (-item[0], item[1].stable_id))
+    ranked: list[RankedPaper] = []
+    for semantic, lexical_value, paper, reason, aspects in judged:
+        ranked.append(RankedPaper(
+            paper=paper,
+            lexical_score=lexical_value,
+            llm_score=semantic,
+            final_score=round(min(1.0, max(0.0, semantic)), 6),
+            selection_reason=reason,
+            matched_aspects=aspects,
+        ))
+    for lexical_value, paper in fallback:
+        ranked.append(RankedPaper(
+            paper=paper,
+            lexical_score=lexical_value,
+            llm_score=None,
+            final_score=round(min(1.0, max(0.0, lexical_value)), 6),
+            selection_reason=(
+                "Ranked by deterministic title, abstract, keyword, and recency overlap"
+            ),
+            matched_aspects=sorted(tokens(request.research_question) & tokens(paper.title)),
+        ))
     return ranked, warnings
 
 

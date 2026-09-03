@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     literature_timeout_seconds: float = Field(default=30, gt=0)
     literature_cache_ttl_seconds: float = Field(default=900, gt=0)
 
+    # 排序口径：被 LLM 精筛判为 include 的论文按语义相关分优先排序，词法分仅作为
+    # 未进入精筛名单论文的兜底。以下权重字段保留仅为旧配置兼容，不再参与计算。
     ranking_lexical_weight: float = Field(default=0.45, ge=0, le=1)
     ranking_llm_weight: float = Field(default=0.55, ge=0, le=1)
     ranking_llm_top_n: int = Field(default=10, ge=1, le=30)

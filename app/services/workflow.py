@@ -40,6 +40,17 @@ async def _resolve_open_access_url(literature, metadata) -> tuple[str | None, st
     return None, f"已通过 DOI {metadata.doi} 补查全文，但未发现开放获取 PDF。"
 
 
+def _arxiv_pdf_url(metadata) -> str | None:
+    """Return the canonical public PDF URL for an arXiv-sourced paper, if any."""
+    arxiv_id = metadata.arxiv_id or (
+        metadata.stable_id[len("arxiv:"):] if metadata.stable_id.startswith("arxiv:") else None
+    )
+    if not arxiv_id:
+        return None
+    identifier = arxiv_id.strip().rstrip("/").rsplit("/", 1)[-1]
+    return f"https://arxiv.org/pdf/{identifier}"
+
+
 class ResearchWorkflowService:
     """Run durable paper-research jobs without depending on the HTTP layer."""
 
@@ -85,18 +96,25 @@ class ResearchWorkflowService:
             source_url, discovery_error = await _resolve_open_access_url(
                 self.literature, paper.metadata
             )
+            source_candidates = []
+            if source_url:
+                source_candidates.append(source_url)
+            arxiv_url = _arxiv_pdf_url(paper.metadata)
+            if arxiv_url and arxiv_url not in source_candidates:
+                source_candidates.append(arxiv_url)
             acquisition = PaperAcquisition(
                 project_id=job.project_id, paper_id=paper_id, status="awaiting_upload",
                 source_url=source_url, error=discovery_error, updated_at=utc_now(),
             )
-            if source_url:
+            failures: list[str] = []
+            for candidate in source_candidates:
                 try:
                     await transfer.upsert_acquisition(
                         acquisition.model_copy(update={"status": "downloading"})
                     )
                     content, final_url = await OpenAccessDownloader(
                         document_service.workspace.max_document_bytes
-                    ).fetch(source_url)
+                    ).fetch(candidate)
                     entry = document_service.workspace.import_pdf_bytes(
                         job.project_id, f"{paper_id}.pdf", content
                     )
@@ -108,9 +126,12 @@ class ResearchWorkflowService:
                         "status": "parsed", "source_url": final_url,
                         "document_id": linked.document_id, "updated_at": utc_now(),
                     })
+                    break
                 except Exception as exc:  # noqa: BLE001 - upload is the explicit fallback
+                    failures.append(f"{candidate}: {str(exc)[:300]}")
                     acquisition = acquisition.model_copy(update={
-                        "status": "awaiting_upload", "error": str(exc)[:1_000],
+                        "status": "awaiting_upload",
+                        "error": "；".join(failures)[:1_000] if failures else discovery_error,
                         "updated_at": utc_now(),
                     })
             await transfer.upsert_acquisition(acquisition)

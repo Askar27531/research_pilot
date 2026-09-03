@@ -11,10 +11,7 @@
       "timeout_seconds": 45,
       "capabilities": {
         "literature.search.arxiv": {"tool": "search_papers", "priority": 10},
-        "literature.metadata.arxiv": {"tool": "get_abstract", "priority": 10},
-        "paper.download.arxiv": {"tool": "download_paper", "priority": 10},
-        "paper.outline.arxiv": {"tool": "get_paper_outline", "priority": 10},
-        "paper.section.arxiv": {"tool": "read_paper_section", "priority": 10}
+        "literature.metadata.arxiv": {"tool": "get_abstract", "priority": 10}
       }
     },
     {

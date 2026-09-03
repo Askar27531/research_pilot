@@ -84,6 +84,73 @@ def normalize_arxiv_search(value: Any, query: str) -> SearchResult:
     )
 
 
+def _find_paper_payload(value: Any) -> dict[str, Any] | None:
+    """Locate a tool-result dictionary that looks like one paper record."""
+    if isinstance(value, dict):
+        if isinstance(value.get("title"), str) and (
+            "abstract" in value or "summary" in value or "published" in value or "id" in value
+        ):
+            return value
+        for candidate in value.values():
+            found = _find_paper_payload(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict) and "text" in item:
+                try:
+                    parsed = json.loads(item["text"])
+                except (json.JSONDecodeError, TypeError):
+                    parsed = item["text"]
+                found = _find_paper_payload(parsed)
+                if found is not None:
+                    return found
+            found = _find_paper_payload(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _arxiv_year(value: Any) -> int | None:
+    for key in ("published", "date", "updated", "submitted"):
+        raw = value.get(key) if isinstance(value, dict) else None
+        if isinstance(raw, str) and raw[:4].isdigit():
+            return int(raw[:4])
+    return None
+
+
+def _arxiv_abstract_metadata(arxiv_id: str, value: Any) -> PaperMetadata:
+    """Parse the external `get_abstract` result into one arXiv paper record."""
+    payload = _find_paper_payload(value)
+    if not payload or not isinstance(payload.get("title"), str) or not payload["title"].strip():
+        raise ValueError("External arXiv metadata returned no paper record")
+    identifier = str(
+        payload.get("paper_id") or payload.get("arxiv_id") or payload.get("id") or arxiv_id
+    ).strip().rstrip("/").rsplit("/", 1)[-1]
+    abstract = payload.get("abstract") or payload.get("summary")
+    authors = [
+        PaperAuthor(name=str(
+            author.get("name") if isinstance(author, dict) else author
+        ))
+        for author in payload.get("authors", [])
+        if str(author.get("name") if isinstance(author, dict) else author).strip()
+    ]
+    pdf_url = payload.get("pdf_url") or payload.get("open_access_url")
+    return PaperMetadata(
+        stable_id=f"arxiv:{identifier}",
+        source_id=identifier,
+        title=payload["title"].strip(),
+        authors=authors,
+        year=_arxiv_year(payload),
+        abstract=abstract if isinstance(abstract, str) else None,
+        arxiv_id=identifier,
+        open_access_url=pdf_url if isinstance(pdf_url, str) else None,
+        source="arxiv",
+        sources=["arxiv"],
+        source_records=[{"source": "external-arxiv-mcp", "id": identifier}],
+    )
+
+
 class LiteratureCapabilityClient:
     """Stable literature port backed by the MCP capability router."""
 
@@ -162,3 +229,20 @@ class LiteratureCapabilityClient:
     async def get_paper_metadata(self, identifier: str) -> PaperMetadata:
         value = await self.router.call("literature.metadata", {"identifier": identifier})
         return PaperMetadata.model_validate(value)
+
+    async def get_arxiv_abstract(self, arxiv_id: str) -> PaperMetadata | None:
+        """Fetch authoritative arXiv metadata/abstract for screening enrichment.
+
+        Returns None (never raises) when the external capability is unavailable
+        or returns an unparsable payload; callers fall back to partial metadata.
+        """
+        if not arxiv_id:
+            return None
+        try:
+            return await self.router.call(
+                "literature.metadata.arxiv",
+                {"paper_id": arxiv_id.strip()},
+                result_adapter=lambda result: _arxiv_abstract_metadata(arxiv_id, result),
+            )
+        except Exception:  # noqa: BLE001 - enrichment is best effort
+            return None

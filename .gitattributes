@@ -1,0 +1,29 @@
+# Line endings: normalize all text files to LF in the index and working tree.
+* text=auto
+
+# Source, config and documentation are written cross-platform; keep LF on checkout.
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.txt text eol=lf
+*.example text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf
+*.bat text eol=crlf
+
+# Binary assets must never be normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.db binary
+*.whl binary
+*.zip binary

@@ -59,3 +59,5 @@ Desktop.ini
 
 # Notebook checkpoints
 .ipynb_checkpoints/
+
+# Agent/tooling metadata.agents/

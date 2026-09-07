@@ -1,7 +1,7 @@
 import pytest
 
+from app.graph.analysis_nodes import _arxiv_pdf_url, _resolve_open_access_url
 from app.schemas import PaperMetadata
-from app.services.workflow import _arxiv_pdf_url, _resolve_open_access_url
 
 
 class _MetadataClient:

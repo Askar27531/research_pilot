@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 MAIN_STAGES = (
     "setup", "searching", "paper_selection", "acquiring_selected",
-    "documents_needed", "analyzing_selected", "analysis_review", "failed",
+    "documents_needed", "analyzing_selected", "paused", "analysis_review", "failed",
 )
 
 
@@ -75,6 +75,13 @@ class ProjectWorkspace(BaseModel):
     analysis_requirements: str | None = None
     analysis_report: dict[str, Any] | None = None
     evidence_review: dict[str, int] = Field(default_factory=dict)
+    high_risk_review_count: int = 0
+    budget_hint: dict[str, Any] | None = None
+    # Event-ized HITL (V16): a waiting project that holds an open hitl_event IS
+    # `waiting_for_human` (derived view, no extra top-level status).
+    waiting_for_human: bool = False
+    hitl_events: list[dict[str, Any]] = Field(default_factory=list)
+    analysis_board: list[dict[str, Any]] = Field(default_factory=list)
     resources: list[dict[str, Any]] = Field(default_factory=list)
     diagnostics: dict[str, Any] = Field(default_factory=dict)
     project_input: dict[str, Any] = Field(default_factory=dict)
@@ -144,9 +151,44 @@ class ReanalyzeSelectedAction(BaseModel):
     type: Literal["reanalyze_selected"]
 
 
+class PauseAnalysisAction(BaseModel):
+    type: Literal["pause_analysis"]
+
+
+class ResumeAnalysisAction(BaseModel):
+    type: Literal["resume_analysis"]
+
+
+class ReviewGateContinueAction(BaseModel):
+    """M3 ReviewGate: skip the pre-synthesis review and synthesize as-is."""
+
+    type: Literal["review_gate_continue"]
+
+
+class ReviewGateRegenerateAction(BaseModel):
+    """M3 ReviewGate: the human processed disputed evidence first; clear the
+    per-paper analyses so the graph re-runs them before synthesizing."""
+
+    type: Literal["review_gate_regenerate"]
+
+
+AnalysisPart = Literal["problem", "method", "experiment", "critical", "overview"]
+
+
+class ReanalyzePartAction(BaseModel):
+    """Re-analyze one per-paper block (with an optional extra requirement)."""
+
+    type: Literal["reanalyze_part"]
+    paper_token: str = Field(min_length=10)
+    part: AnalysisPart
+    instruction: str | None = Field(default=None, min_length=1, max_length=2_000)
+
+
 WorkspaceActionRequest = Annotated[
     RunWorkspaceAction | EvidenceReviewWorkspaceAction | RegenerateSearchAction
-    | ReselectPapersAction | SelectPapersAction | ReanalyzeSelectedAction,
+    | ReselectPapersAction | SelectPapersAction | ReanalyzeSelectedAction
+    | PauseAnalysisAction | ResumeAnalysisAction | ReanalyzePartAction
+    | ReviewGateContinueAction | ReviewGateRegenerateAction,
     Field(discriminator="type"),
 ]
 

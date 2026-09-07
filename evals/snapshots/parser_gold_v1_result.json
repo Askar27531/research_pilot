@@ -1,0 +1,26 @@
+{
+  "figure_label_found": true,
+  "figure_page_correct": true,
+  "mentions_complete": true,
+  "header_excluded": true,
+  "page_numbers_removed": true,
+  "references_page_excluded": true,
+  "cache_stable": true,
+  "sections_all_typed": true,
+  "page_count": 4,
+  "sections_detected": [
+    [
+      "3 Method",
+      "method"
+    ],
+    [
+      "4 Experiments",
+      "experiment"
+    ],
+    [
+      "References",
+      "references"
+    ]
+  ],
+  "all_pass": true
+}

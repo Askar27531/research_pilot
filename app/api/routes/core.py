@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import (
     APIRouter,
@@ -18,6 +18,9 @@ from app.api.routes.health import health
 from app.schemas import (
     ProjectSummary,
     ProjectWorkspace,
+    ReviewDesk,
+    ReviewPreviewRequest,
+    ReviewPreviewResult,
     WorkspaceActionRequest,
     WorkspaceMutationResult,
     WorkspaceProjectCreate,
@@ -98,6 +101,24 @@ async def upload_documents(
     return await service.upload(
         project_id, upload_token, first.filename or "paper.pdf", content
     )
+
+
+@router.get("/projects/{project_id}/review-desk", response_model=ReviewDesk)
+async def get_review_desk(
+    project_id: str,
+    service: Service,
+    segment: Annotated[Literal["priority", "all"], Query()] = "priority",
+) -> ReviewDesk:
+    return await service.review_desk(project_id, segment)
+
+
+@router.post(
+    "/projects/{project_id}/review-desk/preview", response_model=ReviewPreviewResult
+)
+async def preview_review(
+    project_id: str, body: ReviewPreviewRequest, service: Service
+) -> ReviewPreviewResult:
+    return await service.review_preview(project_id, body)
 
 
 @router.get("/projects/{project_id}/resources/{token}")

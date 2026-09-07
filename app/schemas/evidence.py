@@ -46,6 +46,60 @@ class LinkedDocument(BaseModel):
     created_at: str
 
 
+class VerificationRegion(BaseModel):
+    """A verdict-grounded region inside the crop image.
+
+    Coordinates are normalized to the crop image (0..1), so the region stays
+    valid regardless of the image's pixel size.
+    """
+
+    bbox: BoundingBox = Field(description="Normalized [0..1] region within the crop")
+    note: str = Field(min_length=1, max_length=200)
+
+
+class VisualVerificationVerdict(BaseModel):
+    """Verdict of the automatic visual review pass (figure/table vs. a claim).
+
+    Mirrors the human evidence-review statuses so an auto verdict can be written
+    into evidence_reviews and later overridden by the user.
+    """
+
+    status: Literal["confirmed", "doubted", "excluded"]
+    reason: str = Field(min_length=1, max_length=600)
+    confidence: float = Field(ge=0, le=1)
+    regions: list[VerificationRegion] = Field(
+        default_factory=list,
+        description="Optional grounded regions; empty when none can be pointed to",
+    )
+
+
+class BlindVisualFacts(BaseModel):
+    """Phase A of the anti-bias verification flow: image facts read *before* the
+    claim is shown, so the verdict cannot be contaminated by conclusion-first bias.
+    """
+
+    visible_facts: list[str] = Field(min_length=1, max_length=10)
+    unknowns: list[str] = Field(default_factory=list, max_length=10)
+
+
+class ProseConsistencyCheck(BaseModel):
+    """One prose-mention sentence checked against what is actually visible."""
+
+    mention_index: int = Field(ge=1)
+    status: Literal["consistent", "inconsistent", "unverifiable"]
+    visible_evidence: str = Field(min_length=1, max_length=800)
+    region: VerificationRegion | None = None
+    note: str = Field(default="", max_length=600)
+
+
+class CrossModalConsistencyReport(BaseModel):
+    """M2 output: for a figure/table with prose mentions, how the paper's own
+    claims compare to the image content - independent of the analysis stage.
+    """
+
+    checks: list[ProseConsistencyCheck] = Field(min_length=1, max_length=12)
+
+
 class ClaimValue(BaseModel):
     value: str = Field(min_length=1, max_length=4_000)
     kind: Literal["supported", "inference", "suggestion"] = "supported"

@@ -1,12 +1,16 @@
 import asyncio
 import base64
+import json
+import logging
 from collections.abc import Sequence
 from typing import Any, Self
 
 import httpx
 
 from app.core.config import Settings, get_settings
-from app.llm.base import LLMError, LLMProvider, StructuredOutput
+from app.llm.base import LLMCallUsage, LLMError, LLMProvider, StructuredOutput, UsageSink
+
+logger = logging.getLogger(__name__)
 
 
 class OllamaProvider(LLMProvider):
@@ -16,8 +20,10 @@ class OllamaProvider(LLMProvider):
         self,
         settings: Settings | None = None,
         client: httpx.AsyncClient | None = None,
+        usage_sink: UsageSink | None = None,
     ) -> None:
         self.settings = settings or get_settings()
+        self.usage_sink = usage_sink
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             base_url=self.settings.ollama_base_url.rstrip("/"),
@@ -88,14 +94,34 @@ class OllamaProvider(LLMProvider):
         error_label: str,
         max_output_tokens: int | None = None,
     ) -> StructuredOutput:
+        """Ask for schema-valid JSON with bounded, output-aware retries.
+
+        When the model is *cut off* at its token budget (Ollama reports
+        ``done_reason == "length"`` or the JSON simply stops mid-document), a plain
+        retry regenerates the same truncated answer because ``num_predict`` is
+        unchanged — that is why the previous retries kept failing on the same visual.
+        Each retry therefore raises the output budget until the JSON can finish
+        (up to a ceiling). An explicit ``max_output_tokens`` request budget is
+        treated as a hard ceiling and is never exceeded.
+        """
         last_error: ValueError | None = None
         effective_messages = list(messages)
+        output_budget = (
+            max_output_tokens
+            if max_output_tokens is not None
+            else self._default_output_budget(model)
+        )
+        budget_ceiling = (
+            max_output_tokens
+            if max_output_tokens is not None
+            else self._output_budget_ceiling(model)
+        )
         for attempt in range(self.settings.ollama_structured_max_attempts):
             data = await self._request(
                 effective_messages,
                 format_schema=schema,
                 model=model,
-                max_output_tokens=max_output_tokens,
+                max_output_tokens=output_budget,
             )
             candidates = _structured_response_candidates(data)
             if not candidates:
@@ -105,20 +131,62 @@ class OllamaProvider(LLMProvider):
                     return response_model.model_validate_json(candidate)
                 except ValueError as exc:
                     last_error = exc
-            if attempt + 1 < self.settings.ollama_structured_max_attempts:
-                effective_messages = [
-                    *messages,
-                    {
-                        "role": "system",
-                        "content": (
-                            "The previous response was invalid or truncated JSON. Return only a compact "
-                            "JSON object matching the schema. Shorten prose where necessary and always "
-                            "close every string, array, and object before the output limit."
-                        ),
-                    },
-                ]
-                await asyncio.sleep(0.25 * (attempt + 1))
+            if attempt + 1 >= self.settings.ollama_structured_max_attempts:
+                continue
+            truncated = self._response_was_truncated(
+                data, output_budget, candidates
+            )
+            budget_raised = truncated and output_budget < budget_ceiling
+            if budget_raised:
+                output_budget = min(budget_ceiling, output_budget * 2)
+            effective_messages = [
+                *messages,
+                {
+                    "role": "system",
+                    "content": (
+                        _TRUNCATED_RETRY_INSTRUCTION
+                        if budget_raised else _INVALID_RETRY_INSTRUCTION
+                    ),
+                },
+            ]
+            await asyncio.sleep(0.25 * (attempt + 1))
         raise LLMError(f"Ollama returned invalid {error_label}: {last_error}") from last_error
+
+    def _default_output_budget(self, model: str | None) -> int:
+        """Configured token budget for an unbounded structured request."""
+        if model is not None:
+            return self.settings.ollama_vision_num_predict
+        return self.settings.ollama_num_predict
+
+    @staticmethod
+    def _output_budget_ceiling(model: str | None) -> int:
+        """Ceiling for retry escalation; mirrors the Field(le=...) bounds on the
+        corresponding settings knobs (ollama_vision_num_predict / ollama_num_predict)."""
+        return 4096 if model is not None else 8192
+
+    @staticmethod
+    def _response_was_truncated(
+        data: dict[str, Any],
+        output_budget: int | None,
+        candidates: Sequence[str],
+    ) -> bool:
+        """True when the model hit the output limit before the JSON could finish.
+
+        Ollama reports ``done_reason == "length"`` and the number of generated
+        tokens (``eval_count``) when generation stops at ``num_predict``. As a
+        fallback (older Ollama builds), a candidate whose JSON stops mid-document
+        is treated as truncated too.
+        """
+        if data.get("done_reason") == "length":
+            return True
+        eval_count = data.get("eval_count")
+        if (
+            isinstance(eval_count, int)
+            and output_budget is not None
+            and eval_count >= output_budget
+        ):
+            return True
+        return any(_is_truncated_json(candidate) for candidate in candidates)
 
     async def _request(
         self,
@@ -174,7 +242,30 @@ class OllamaProvider(LLMProvider):
 
         if not isinstance(data, dict):
             raise LLMError("Ollama returned a non-object JSON response")
+        await self._meter(data, payload["model"], is_vision)
         return data
+
+    async def _meter(self, data: dict[str, Any], model: str, is_vision: bool) -> None:
+        """Feed one successful HTTP call into the run's usage sink (best effort).
+
+        Metered per actual response: an invalid-JSON attempt that triggered a
+        retry already cost tokens and is counted as the real spend it is. A
+        failing sink must never break (or slow down) the LLM call itself.
+        """
+        # Metering is observability, never a gate: a failing sink must not
+        # break (or slow down) the LLM call that already succeeded.
+        if self.usage_sink is None:
+            return
+        try:
+            await self.usage_sink(LLMCallUsage(
+                kind="vision" if is_vision else "text",
+                model=str(data.get("model") or model),
+                prompt_tokens=int(data.get("prompt_eval_count") or 0),
+                completion_tokens=int(data.get("eval_count") or 0),
+                latency_ms=None,
+            ))
+        except Exception:
+            logger.warning("usage sink failed for model=%s", model, exc_info=True)
 
     async def close(self) -> None:
         if self._owns_client:
@@ -243,3 +334,32 @@ def _structured_response_candidates(data: dict[str, Any]) -> list[str]:
         if start >= 0 and end > start and stripped[start:end + 1] != stripped:
             candidates.append(stripped[start:end + 1])
     return list(dict.fromkeys(candidates))
+
+
+def _is_truncated_json(candidate: str) -> bool:
+    """True when *candidate* is JSON that stops mid-document (cut by an output limit).
+
+    Completion heuristics: a string that never closes, or a parse error at the very
+    end of the input, both mean the document was cut before it could finish.
+    """
+    try:
+        json.loads(candidate)
+        return False
+    except json.JSONDecodeError as exc:
+        if exc.msg.startswith("Unterminated string"):
+            return True
+        return exc.pos >= len(candidate.rstrip()) - 1
+
+
+_INVALID_RETRY_INSTRUCTION = (
+    "The previous response was invalid or truncated JSON. Return only a compact "
+    "JSON object matching the schema. Shorten prose where necessary and always "
+    "close every string, array, and object before the output limit."
+)
+
+_TRUNCATED_RETRY_INSTRUCTION = (
+    "The previous response was truncated JSON: it was cut off by the output limit "
+    "before the JSON was complete. The output budget has been increased, so now "
+    "finish the complete JSON object matching the schema. Be concise but do not "
+    "omit required fields, and close every string, array, and object."
+)

@@ -120,6 +120,8 @@ python -m scripts.run_fixed_demo
 
 详细边界见 [架构说明](docs/ARCHITECTURE.md)。历史阶段验证文档保留用于追踪演进，但其中旧路由示例不再是当前接口。
 
+可选：把自研 MCP Server（`literature` / `document`）以 HTTP + **GitHub OAuth 2.1（授权码 + PKCE）** 独立部署给外部 MCP 客户端使用，见 [MCP OAuth 说明](docs/MCP_OAUTH.md)。
+
 ## 当前边界
 
 仅深入支持学术 PDF；不支持 DOCX、PPTX、XLSX 或独立图片。本轮不实现引用网络、PRISMA、系统综述协议、实验执行、训练代码生成、GPU 管理或 MLOps。系统只呈现证据、差异、冲突和风险，不自动宣称研究方向具有创新性。

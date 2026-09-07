@@ -2,12 +2,31 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+BlockRole = Literal["body", "heading", "caption", "header", "footer", "page_number"]
+SectionType = Literal[
+    "abstract", "background", "method", "experiment", "discussion", "references", "other"
+]
+
 
 class BoundingBox(BaseModel):
     x0: float
     y0: float
     x1: float
     y1: float
+
+
+class DocumentBlock(BaseModel):
+    """A text block with its typographic role, kept in reading order.
+
+    Roles let downstream stages (chunking, evidence building) drop noise such as
+    headers/footers/page numbers and treat captions and headings as boundaries
+    instead of mid-paragraph cut points.
+    """
+
+    index: int = Field(ge=0)
+    role: BlockRole = "body"
+    text: str = Field(min_length=1, max_length=8_000)
+    bbox: BoundingBox | None = None
 
 
 class DocumentEntry(BaseModel):
@@ -34,6 +53,7 @@ class DocumentPage(BaseModel):
     rotation: int
     screenshot_path: str | None = None
     error: str | None = None
+    blocks: list[DocumentBlock] = Field(default_factory=list)
 
 
 class DocumentSection(BaseModel):
@@ -42,6 +62,19 @@ class DocumentSection(BaseModel):
     end_page: int = Field(ge=1)
     level: int = Field(default=1, ge=1, le=6)
     confidence: float = Field(ge=0, le=1)
+    type: SectionType = "other"
+
+
+class FigureMention(BaseModel):
+    """A sentence in the paper prose that references a figure/table by label.
+
+    Backing link for cross-modal grounding: it lets the visual analysis and the
+    automatic visual review see what the paper *says* about a figure, instead of
+    asking the vision model to interpret a crop with only its caption.
+    """
+
+    page_number: int = Field(ge=1)
+    sentence: str = Field(min_length=1, max_length=500)
 
 
 class DocumentFigure(BaseModel):
@@ -55,6 +88,7 @@ class DocumentFigure(BaseModel):
     source_path: str
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     extraction_method: Literal["raster", "vector_region"] = "raster"
+    mentions: list[FigureMention] = Field(default_factory=list)
 
 
 class TableCandidate(BaseModel):
@@ -67,6 +101,7 @@ class TableCandidate(BaseModel):
     cells: list[list[str | None]] = Field(default_factory=list)
     source_path: str | None = None
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    mentions: list[FigureMention] = Field(default_factory=list)
 
 
 class VisualObservation(BaseModel):

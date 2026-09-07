@@ -176,21 +176,73 @@ class ResearchSessionRepository:
 
     async def reset_analysis(self, project_id: str, revision: int) -> None:
         """Discard generated prose while retaining parsed documents and evidence."""
+        await self.delete_analysis(project_id, revision)
         async with self.database.connect() as connection:
-            await connection.execute(
-                "DELETE FROM analysis_reports WHERE project_id=? AND search_revision=?",
-                (project_id, revision),
-            )
-            await connection.execute(
-                "DELETE FROM selected_paper_analyses WHERE project_id=? AND search_revision=?",
-                (project_id, revision),
-            )
             await connection.execute(
                 "DELETE FROM work_items WHERE project_id=? AND item_type='paper_analysis_section' "
                 "AND run_scope LIKE ?",
                 (project_id, f"paper-analysis:{revision}:%"),
             )
             await connection.commit()
+
+    async def delete_analysis(
+        self, project_id: str, revision: int, paper_id: str | None = None
+    ) -> None:
+        """Drop the report and (optionally) one paper's analysis row.
+
+        Used by "re-analyze one part": the report is always stale once any paper
+        analysis changes; only the targeted paper's row is removed so the worker
+        re-runs that paper (untouched parts come back from the work-item cache).
+        """
+        async with self.database.connect() as connection:
+            await connection.execute(
+                "DELETE FROM analysis_reports WHERE project_id=? AND search_revision=?",
+                (project_id, revision),
+            )
+            if paper_id is None:
+                await connection.execute(
+                    "DELETE FROM selected_paper_analyses WHERE project_id=? "
+                    "AND search_revision=?",
+                    (project_id, revision),
+                )
+            else:
+                await connection.execute(
+                    "DELETE FROM selected_paper_analyses WHERE project_id=? "
+                    "AND search_revision=? AND paper_id=?",
+                    (project_id, revision, paper_id),
+                )
+            await connection.commit()
+
+    async def save_part_instruction(
+        self, project_id: str, revision: int, paper_id: str,
+        part_key: str, instruction: str,
+    ) -> None:
+        """Persist a per-(paper, part) extra requirement for partial re-analysis."""
+        now = utc_now()
+        async with self.database.connect() as connection:
+            await connection.execute(
+                "INSERT INTO analysis_part_instructions(project_id,revision,paper_id,"
+                "part_key,instruction,updated_at) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(project_id,revision,paper_id,part_key) DO UPDATE SET "
+                "instruction=excluded.instruction,updated_at=excluded.updated_at",
+                (project_id, revision, paper_id, part_key, instruction.strip(), now),
+            )
+            await connection.commit()
+
+    async def part_instructions(
+        self, project_id: str, revision: int
+    ) -> dict[str, dict[str, str]]:
+        """paper_id -> {part_key: instruction} for the current revision."""
+        async with self.database.connect() as connection:
+            rows = await (await connection.execute(
+                "SELECT paper_id,part_key,instruction FROM analysis_part_instructions "
+                "WHERE project_id=? AND revision=?",
+                (project_id, revision),
+            )).fetchall()
+        result: dict[str, dict[str, str]] = {}
+        for row in rows:
+            result.setdefault(row["paper_id"], {})[row["part_key"]] = row["instruction"]
+        return result
 
     async def report(self, project_id: str, revision: int) -> AnalysisReport | None:
         async with self.database.connect() as connection:

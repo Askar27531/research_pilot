@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "name": "cross-modal-consistency-gold",
+  "description": "Gold items to quantify how well the deployed vision model judges prose-vs-figure consistency. Each item pairs a deterministically rendered chart with one prose mention sentence whose ground truth is consistent / inconsistent / unverifiable. chart: acc = two accuracy bars (A 0.80 vs B 0.50); trend = a rising training-metric curve.",
+  "items": [
+    {
+      "id": "acc-consistent",
+      "chart": "acc",
+      "mention": "In Fig. 3, model A achieves higher accuracy than model B.",
+      "gold": "consistent"
+    },
+    {
+      "id": "acc-inconsistent",
+      "chart": "acc",
+      "mention": "In Fig. 3, model B achieves higher accuracy than model A.",
+      "gold": "inconsistent"
+    },
+    {
+      "id": "acc-unverifiable",
+      "chart": "acc",
+      "mention": "The models shown in Fig. 3 were also evaluated on ImageNet.",
+      "gold": "unverifiable"
+    },
+    {
+      "id": "trend-consistent",
+      "chart": "trend",
+      "mention": "Fig. 3 shows that the training metric keeps increasing over epochs.",
+      "gold": "consistent"
+    },
+    {
+      "id": "trend-inconsistent",
+      "chart": "trend",
+      "mention": "Fig. 3 shows that the training metric decreases over epochs.",
+      "gold": "inconsistent"
+    },
+    {
+      "id": "trend-unverifiable",
+      "chart": "trend",
+      "mention": "The training set used for the run in Fig. 3 contains 100k samples.",
+      "gold": "unverifiable"
+    }
+  ]
+}

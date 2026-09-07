@@ -108,3 +108,84 @@ async def test_structured_retry_requests_compact_closed_json_after_truncation() 
     assert result.value == "complete"
     retry_messages = client.calls[1][1]["json"]["messages"]
     assert "truncated JSON" in retry_messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_vision_truncation_retry_escalates_output_budget() -> None:
+    """A vision response cut at num_predict retries with a larger budget instead of
+    deterministically re-truncating at the same spot (the reported visual-analysis
+    failure: EOF inside a JSON string, repeated on every attempt)."""
+    client = RecordingClient()
+    responses = iter([
+        {
+            "done_reason": "length",
+            "eval_count": 512,
+            "message": {"content": '{"value":"unfinished'},
+        },
+        {"message": {"content": '{"value":"complete"}'}},
+    ])
+
+    async def post(path, **kwargs):
+        client.calls.append((path, kwargs))
+        return httpx.Response(
+            200,
+            json=next(responses),
+            request=httpx.Request("POST", f"http://ollama.test{path}"),
+        )
+
+    client.post = post  # type: ignore[method-assign]
+    provider = OllamaProvider(Settings(
+        ollama_model="qwen3:latest",
+        ollama_vision_model="qwen3-vl:8b",
+        ollama_vision_num_predict=512,
+        ollama_structured_max_attempts=2,
+    ), client)  # type: ignore[arg-type]
+
+    result = await provider.structured_output_with_images(
+        [{"role": "user", "content": "analyze the figure"}],
+        [b"fake-image-bytes"],
+        TinyResult,
+    )
+
+    assert result.value == "complete"
+    assert client.calls[0][1]["json"]["options"]["num_predict"] == 512
+    assert client.calls[1][1]["json"]["options"]["num_predict"] == 1024
+    retry_messages = client.calls[1][1]["json"]["messages"]
+    assert "truncated JSON" in retry_messages[-1]["content"]
+    assert "increased" in retry_messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_but_complete_json_retry_keeps_budget() -> None:
+    """Schema-invalid but *complete* JSON (e.g. enum violation) is not an output
+    truncation, so the retry keeps the same budget and just asks for compact JSON."""
+    client = RecordingClient()
+    responses = iter([
+        {"done_reason": "stop", "eval_count": 40,
+         "message": {"content": '{"value": 42}'}},
+        {"done_reason": "stop", "eval_count": 30,
+         "message": {"content": '{"value": "fixed"}'}},
+    ])
+
+    async def post(path, **kwargs):
+        client.calls.append((path, kwargs))
+        return httpx.Response(
+            200,
+            json=next(responses),
+            request=httpx.Request("POST", f"http://ollama.test{path}"),
+        )
+
+    client.post = post  # type: ignore[method-assign]
+    provider = OllamaProvider(Settings(
+        ollama_model="qwen3:latest",
+        ollama_vision_model="qwen3-vl:8b",
+        ollama_structured_max_attempts=2,
+    ), client)  # type: ignore[arg-type]
+
+    result = await provider.structured_output(
+        [{"role": "user", "content": "analyze"}], TinyResult
+    )
+
+    assert result.value == "fixed"
+    assert client.calls[0][1]["json"]["options"]["num_predict"] == 1536
+    assert client.calls[1][1]["json"]["options"]["num_predict"] == 1536

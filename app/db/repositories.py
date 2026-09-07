@@ -88,6 +88,23 @@ class ProjectRepository:
             if active is not None:
                 await connection.rollback()
                 raise ProjectConflictError("Project still has an active workflow job")
+            # LangGraph checkpoint tables are created by AsyncSqliteSaver at app startup
+            # (app/main.py), not by migrations, so they may be absent (e.g. unit tests).
+            # Their thread_id is "{project_id}:search-{revision}:{track}"
+            # (see app/agents/literature.py), so a prefix delete removes every graph run
+            # this project ever started; otherwise orphan rows would accumulate forever.
+            owns_graph_state = await (await connection.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                "AND name IN ('checkpoints','writes')"
+            )).fetchone()
+            if owns_graph_state[0] == 2:
+                prefix = f"{project_id}:%"
+                await connection.execute(
+                    "DELETE FROM checkpoints WHERE thread_id LIKE ?", (prefix,)
+                )
+                await connection.execute(
+                    "DELETE FROM writes WHERE thread_id LIKE ?", (prefix,)
+                )
             await connection.execute("DELETE FROM projects WHERE id=?", (project_id,))
             await connection.commit()
 
@@ -177,6 +194,94 @@ class ProjectRepository:
             await connection.commit()
         return await self.get(project_id)
 
+    async def wait_for_human(
+        self,
+        project_id: str,
+        current_stage: str,
+        *,
+        event_type: str,
+        title: str,
+        reason: str | None = None,
+        scope: dict[str, Any] | None = None,
+        options: "list[dict[str, str]] | None" = None,
+        level: str = "blocking",
+        created_by: str = "system",
+        default_action: str | None = None,
+        run_id: str | None = None,
+    ) -> ProjectRecord:
+        """Park a project at *current_stage* AND record one open hitl_event, in a
+        single transaction.
+
+        ``status='waiting'`` + an open event is the derived ``waiting_for_human``
+        semantic (the plan deliberately avoids a sixth top-level status). The
+        worker refuses to start jobs for a project holding an open event, so a
+        human decision (resolving the event via an action) is the only way the
+        project moves forward again.
+        """
+        event_id = str(uuid4())
+        now = utc_now()
+        async with self.database.connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                "UPDATE projects SET status='waiting',current_stage=?,error_json=NULL,"
+                "updated_at=?,version=version+1 WHERE id=?",
+                (current_stage, now, project_id),
+            )
+            if cursor.rowcount == 0:
+                await connection.rollback()
+                raise RecordNotFoundError(f"Project not found: {project_id}")
+            await connection.execute(
+                "INSERT INTO hitl_events(id,project_id,run_id,type,title,reason,"
+                "scope_json,options_json,level,status,created_by,default_action,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?, 'open',?,?,?)",
+                (event_id, project_id, run_id, event_type, title, reason,
+                 dump_json(scope or {}), dump_json(options or []), level,
+                 created_by, default_action, now),
+            )
+            await connection.commit()
+        return await self.get(project_id)
+
+    async def set_pause_requested(self, project_id: str, requested: bool) -> ProjectRecord:
+        """Cooperative pause flag consumed by the analysis worker at safe boundaries."""
+        async with self.database.connect() as connection:
+            cursor = await connection.execute(
+                "UPDATE projects SET pause_requested=?,updated_at=?,version=version+1 WHERE id=?",
+                (1 if requested else 0, utc_now(), project_id),
+            )
+            if cursor.rowcount == 0:
+                raise RecordNotFoundError(f"Project not found: {project_id}")
+            await connection.commit()
+        return await self.get(project_id)
+
+    async def set_pause_reason(self, project_id: str, reason: str | None) -> ProjectRecord:
+        """Record why the project is parked (``user`` / ``budget_gate`` / None)."""
+        async with self.database.connect() as connection:
+            cursor = await connection.execute(
+                "UPDATE projects SET pause_reason=?,updated_at=?,version=version+1 WHERE id=?",
+                (reason, utc_now(), project_id),
+            )
+            if cursor.rowcount == 0:
+                raise RecordNotFoundError(f"Project not found: {project_id}")
+            await connection.commit()
+        return await self.get(project_id)
+
+    async def set_analysis_review_decision(
+        self, project_id: str, decision: str | None
+    ) -> ProjectRecord:
+        """Record / clear the M3 ReviewGate decision (None | continue |
+        regenerate_after_review). The gate node reads this business-table truth
+        on every entry so human decisions survive job re-runs."""
+        async with self.database.connect() as connection:
+            cursor = await connection.execute(
+                "UPDATE projects SET analysis_review_decision=?,updated_at=?,"
+                "version=version+1 WHERE id=?",
+                (decision, utc_now(), project_id),
+            )
+            if cursor.rowcount == 0:
+                raise RecordNotFoundError(f"Project not found: {project_id}")
+            await connection.commit()
+        return await self.get(project_id)
+
     async def _set_terminal(
         self,
         project_id: str,
@@ -208,6 +313,7 @@ class ProjectRepository:
 
     @staticmethod
     def _to_record(row: aiosqlite.Row) -> ProjectRecord:
+        columns = row.keys()
         return ProjectRecord(
             id=row["id"],
             name=row["name"],
@@ -217,10 +323,81 @@ class ProjectRepository:
             current_stage=row["current_stage"],
             last_run_id=row["last_run_id"],
             error=load_json(row["error_json"]),
+            pause_reason=row["pause_reason"] if "pause_reason" in columns else None,
+            analysis_review_decision=(
+                row["analysis_review_decision"]
+                if "analysis_review_decision" in columns else None
+            ),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             version=row["version"],
         )
+
+
+class HitlEventRepository:
+    """Read / resolve ``hitl_events``.
+
+    Creation is deliberately atomic with the project park
+    (:meth:`ProjectRepository.wait_for_human`), so a project can never sit at
+    ``waiting`` *without* its event or hold an event while still ``running``.
+    """
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def open_events(self, project_id: str) -> list[dict[str, Any]]:
+        """Every open (awaiting-human) event of a project, oldest first."""
+        async with self.database.connect() as connection:
+            rows = await (await connection.execute(
+                "SELECT * FROM hitl_events WHERE project_id=? AND status='open' "
+                "ORDER BY created_at, id", (project_id,),
+            )).fetchall()
+        return [{
+            "id": row["id"], "type": row["type"], "title": row["title"],
+            "reason": row["reason"], "scope": load_json(row["scope_json"]),
+            "options": load_json(row["options_json"]), "level": row["level"],
+            "created_by": row["created_by"], "default_action": row["default_action"],
+            "run_id": row["run_id"], "created_at": row["created_at"],
+        } for row in rows]
+
+    async def has_open(self, project_id: str) -> bool:
+        async with self.database.connect() as connection:
+            row = await (await connection.execute(
+                "SELECT 1 FROM hitl_events WHERE project_id=? AND status='open' LIMIT 1",
+                (project_id,),
+            )).fetchone()
+        return row is not None
+
+    async def resolve_all(
+        self,
+        project_id: str,
+        *,
+        event_type: str | None = None,
+        resolved_by: str = "action",
+        resolution: dict[str, Any] | None = None,
+        status: str = "resolved",
+    ) -> int:
+        """Close every matching open event (a human action consumed the wait).
+
+        ``status`` may be ``resolved`` (the human decided and the project moved
+        on) or ``superseded`` (the wait became obsolete, e.g. a new search
+        replaced the pending paper selection). Returns the closed count.
+        """
+        clause = " AND type=?" if event_type is not None else ""
+        now = utc_now()
+        params: list[Any] = [status, resolved_by,
+                             dump_json(resolution) if resolution else None, now]
+        params.append(project_id)
+        if event_type is not None:
+            params.append(event_type)
+        async with self.database.connect() as connection:
+            cursor = await connection.execute(
+                f"UPDATE hitl_events SET status=?,resolved_by=?,resolution_json=?,"
+                f"resolved_at=? WHERE project_id=? AND status='open'{clause}",
+                params,
+            )
+            await connection.commit()
+        return cursor.rowcount
 
 
 class PaperRepository:

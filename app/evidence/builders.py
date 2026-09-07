@@ -63,7 +63,12 @@ class EvidenceBuilder:
 
     async def build_figure(self, project_id: str, request: FigureEvidenceCreate) -> EvidenceNode:
         await self._validate_link(project_id, request.paper_id, request.document_id)
-        figure = self.documents.get_figure(project_id, request.document_id, request.figure_id)
+        parsed = self.documents.get_structure(project_id, request.document_id)
+        figure = next(
+            (item for item in parsed.figures if item.figure_id == request.figure_id), None
+        )
+        if figure is None:
+            raise DocumentNotFoundError(f"Unknown figure: {request.figure_id}")
         if not self.documents.workspace.resolve_safe_path(project_id, figure.source_path).is_file():
             raise DocumentNotFoundError("Figure artifact is missing")
         node = EvidenceNode(
@@ -75,6 +80,7 @@ class EvidenceBuilder:
             claim=request.claim,
             confidence=request.confidence,
             page_number=figure.page_number,
+            section=self._section_for_page(parsed, figure.page_number),
             label=figure.label or figure.figure_id,
             excerpt=figure.caption,
             bbox=figure.bbox,
@@ -103,6 +109,7 @@ class EvidenceBuilder:
             claim=request.claim,
             confidence=request.confidence,
             page_number=table.page_number,
+            section=self._section_for_page(parsed, table.page_number),
             label=table.label or table.table_id,
             excerpt=table.caption,
             bbox=table.bbox,

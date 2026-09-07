@@ -20,8 +20,10 @@ def _error_message(response: httpx.Response) -> str:
 
 
 @st.cache_data(ttl=3, max_entries=128, show_spinner=False)
-def get_json(path: str, paper: str | None = None):
-    params = {"paper": paper} if paper else None
+def get_json(path: str, paper: str | None = None, query: dict | None = None):
+    params = {"paper": paper} if paper else {}
+    if query:
+        params.update(query)
     response = httpx.get(f"{API}{path}", params=params, timeout=30)
     response.raise_for_status()
     return response.json()
@@ -59,7 +61,8 @@ def text_lines(value: str) -> list[str]:
 def step_header(stage: str, project_id: str | None = None) -> int:
     active = {"setup": 1, "searching": 2, "paper_selection": 3,
               "acquiring_selected": 4, "documents_needed": 4,
-              "analyzing_selected": 4, "analysis_review": 4,
+              "analyzing_selected": 4, "paused": 4,
+              "analysis_review": 4,
               "failed": 4}.get(stage, 1)
     labels = ("描述课题", "检索文献", "选择论文", "证据化分析")
     state_key = f"workflow-view-{project_id}" if project_id else None
@@ -523,8 +526,182 @@ def _render_pdf_reader(report: dict) -> None:
         st.pdf(pdf, height=1050, key=f"analysis-pdf-{pdf_key}")
 
 
-def render_analysis_report(_project_id: str, workspace: dict) -> None:
+_DESK_STATUS_LABEL = {"confirmed": "已确认", "doubted": "存疑", "excluded": "已排除"}
+_DESK_SOURCE_LABEL = {
+    "auto_visual_verifier": "图表自动复核",
+    "auto_consistency": "图文一致性",
+    "human": "人工判定",
+    "auto": "自动复核",
+}
+_DESK_TYPE_LABEL = {"figure": "图", "table": "表", "text": "正文"}
+
+
+def _desk_badge(item: dict) -> str:
+    status = item.get("review_status")
+    if not status:
+        return ":gray[待复核]"
+    color = {"confirmed": "green", "doubted": "orange", "excluded": "red"}.get(
+        status, "gray"
+    )
+    who = _DESK_SOURCE_LABEL.get(item.get("review_source") or "auto", "自动复核")
+    return f":{color}[{who} · {_DESK_STATUS_LABEL[status]}]"
+
+
+def _desk_commit(project_id: str, item: dict, status: str, impact: dict | None = None):
+    result = submit_action(project_id, {
+        "type": "evidence_review",
+        "evidence_token": item["evidence_token"],
+        "status": status,
+    })
+    if result is None:
+        return
+    summary = st.session_state[f"review-session-{project_id}"]
+    summary[status] += 1
+    if status == "excluded" and impact:
+        summary["cited_total"] += int(impact.get("cited_total", 0))
+        summary["downgrade"] += len(impact.get("downgrade") or [])
+        summary["retained"] += len(impact.get("retained") or [])
+    st.rerun()
+
+
+def _render_desk_item(project_id: str, item: dict) -> None:
+    token = item["evidence_token"]
+    pending_key = f"desk-exclude-pending-{project_id}-{token}"
+    kind = item.get("type", "text")
+    label = item.get("label")
+    header = f"**{_DESK_TYPE_LABEL.get(kind, kind)}** "
+    if label:
+        header += f"{label} · "
+    header += f"第 {item['page']} 页 · 置信度 {item['confidence']:.0%} · {_desk_badge(item)}"
+    with st.container(border=True):
+        st.markdown(header)
+        if kind in {"figure", "table"}:
+            st.image(
+                f"{API}{item['resource_url']}",
+                caption=item.get("claim") or "论文图表证据",
+                width="stretch",
+            )
+        else:
+            quote = item.get("excerpt") or item.get("claim") or "无可用摘录"
+            st.markdown(f"> {quote}")
+        note = item.get("review_note")
+        if note:
+            who = _DESK_SOURCE_LABEL.get(item.get("review_source") or "auto", "自动复核")
+            st.caption(f"{who}判定：{note}")
+        cited_by = item.get("cited_by", 0)
+        comparison_hint = "，含双篇比较结论" if item.get("supports_comparison") else ""
+        st.caption(f"被 {cited_by} 条结论引用{comparison_hint} · 决策价值 {item.get('priority', 0):.2f}")
+        citing = item.get("citing") or []
+        if citing:
+            with st.expander(f"引用它的结论 · {len(citing)} 条", expanded=False):
+                for claim in citing:
+                    marker = " :red[(唯一来源，排除后降级为推断)]" if claim.get("will_downgrade") else ""
+                    st.markdown(
+                        f"- **{claim.get('paper_title')} · {claim.get('section_label')}**："
+                        f"{claim.get('value')}{marker}"
+                    )
+        pending = st.session_state.get(pending_key)
+        if pending is None:
+            first, second, third = st.columns(3)
+            if first.button("确认", key=f"desk-confirm-{token}", icon=":material/check:", width="stretch"):
+                _desk_commit(project_id, item, "confirmed")
+            if second.button("存疑", key=f"desk-doubt-{token}", icon=":material/help:", width="stretch"):
+                _desk_commit(project_id, item, "doubted")
+            if third.button(
+                "排除", key=f"desk-exclude-{token}",
+                icon=":material/block:", width="stretch",
+            ):
+                preview = mutate(f"/projects/{project_id}/review-desk/preview", json={
+                    "evidence_token": token, "status": "excluded",
+                })
+                if preview is not None:
+                    st.session_state[pending_key] = preview
+                    st.rerun()
+        else:
+            st.info(pending.get("message") or "请确认是否排除该证据")
+            confirm_column, cancel_column = st.columns(2)
+            if confirm_column.button(
+                "确认排除", key=f"desk-exclude-confirm-{token}", type="primary",
+                icon=":material/block:", width="stretch",
+            ):
+                st.session_state.pop(pending_key, None)
+                _desk_commit(project_id, item, "excluded", pending)
+            if cancel_column.button(
+                "取消", key=f"desk-exclude-cancel-{token}", width="stretch"
+            ):
+                st.session_state.pop(pending_key, None)
+                st.rerun()
+
+
+def render_review_desk(project_id: str, _workspace: dict) -> None:
+    st.subheader("证据复核决策台")
+    session_key = f"review-session-{project_id}"
+    summary = st.session_state.setdefault(
+        session_key,
+        {"confirmed": 0, "doubted": 0, "excluded": 0,
+         "cited_total": 0, "downgrade": 0, "retained": 0},
+    )
+    if any(summary.values()):
+        columns = st.columns(5)
+        columns[0].metric("本轮确认", summary["confirmed"], border=True)
+        columns[1].metric("本轮存疑", summary["doubted"], border=True)
+        columns[2].metric("本轮排除", summary["excluded"], border=True)
+        columns[3].metric("受影响结论", summary["cited_total"], border=True)
+        if columns[4].button(
+            "重置本轮", icon=":material/restart_alt:", key=f"review-reset-{project_id}"
+        ):
+            st.session_state[session_key] = {
+                "confirmed": 0, "doubted": 0, "excluded": 0,
+                "cited_total": 0, "downgrade": 0, "retained": 0,
+            }
+            st.rerun()
+        if summary["excluded"]:
+            st.warning(
+                f"本轮已排除 {summary['excluded']} 条证据：报告仍基于旧证据。请切到"
+                "“综合分析”页并点击“基于现有证据重新生成详细分析”，被排除证据将不再被引用。"
+            )
+    else:
+        st.caption("本轮暂无操作：排除会先回显影响，提交后在此累计量化产出。")
+    segment = st.segmented_control(
+        "待审范围",
+        options=("优先处理", "全部"),
+        default="优先处理",
+        key=f"review-segment-{project_id}",
+    )
+    desk = get_json(
+        f"/projects/{project_id}/review-desk",
+        query={"segment": "priority" if segment == "优先处理" else "all"},
+    )
+    stats = desk.get("stats") or {}
+    st.caption(
+        f"优先队列 {stats.get('high_risk', 0) + stats.get('high_impact', 0)} 条"
+        f"（高危 {stats.get('high_risk', 0)} · 高影响 {stats.get('high_impact', 0)}）"
+        f" · 全队列 {stats.get('actionable', 0)} 条 · 已排除 {stats.get('excluded', 0)} 条"
+    )
+    items = desk.get("items") or []
+    if not items:
+        st.success("没有需要复核的证据。自动存疑且被结论引用的证据会最先出现在这里。")
+        return
+    for item in items:
+        _render_desk_item(project_id, item)
+
+
+def render_analysis_report(project_id: str, workspace: dict) -> None:
     report = workspace.get("analysis_report") or {}
+    high_risk = workspace.get("high_risk_review_count", 0)
+    if high_risk:
+        st.info(
+            f"有 {high_risk} 条自动存疑证据被结论引用，建议先到“证据复核”处理后再重新生成报告。"
+        )
+    view = st.segmented_control(
+        "视图",
+        options=("综合分析", "证据复核"),
+        default="综合分析",
+        key=f"analysis-view-{project_id}",
+    )
+    if view == "证据复核":
+        render_review_desk(project_id, workspace)
+        return
     analysis_column, pdf_column = st.columns([3, 2], gap="medium")
     with analysis_column:
         _render_report_content(report)
@@ -533,9 +710,13 @@ def render_analysis_report(_project_id: str, workspace: dict) -> None:
     if st.button(
         "基于现有证据重新生成详细分析",
         icon=":material/refresh:",
-        help="保留已解析的 PDF、图表和证据，只重新生成更完整的分析报告。",
-    ) and submit_action(_project_id, {"type": "reanalyze_selected"}):
+        help="保留已解析的 PDF、图表和证据，只重新生成更完整的分析报告；被排除的证据将不再被引用。",
+    ) and submit_action(project_id, {"type": "reanalyze_selected"}):
         st.rerun()
+    render_partial_reanalysis(project_id, workspace)
+    if workspace.get("analysis_board"):
+        with st.expander("各阶段完成情况", expanded=False):
+            render_analysis_board(workspace)
 
 
 def render_wait(_project_id: str, _workspace: dict) -> None:
@@ -546,6 +727,174 @@ def render_retry(project_id: str, _workspace: dict) -> None:
     if st.button("安全重试", type="primary", icon=":material/refresh:"):
         submit_action(project_id, {"type": "run"})
         st.rerun()
+
+
+_ANALYSIS_STAGE_ORDER = (
+    "index", "visuals", "problem", "method", "experiment",
+    "critical", "overview", "auto_verify",
+)
+_PART_CHOICES = (
+    ("problem", "问题与贡献"), ("method", "方法与机制"),
+    ("experiment", "实验与结果"), ("critical", "局限与相关性"),
+    ("overview", "综合概述"),
+)
+_PART_LABELS = dict(_PART_CHOICES)
+
+
+def _board_chip(status: str, label: str, done=None, total=None) -> str:
+    suffix = ""
+    if total is not None and status == "running":
+        suffix = f" {done}/{total}"
+    elif total is not None and status == "completed":
+        suffix = f" {total}"
+    if status == "completed":
+        return f":green[✓ {label}{suffix}]"
+    if status == "running":
+        return f":orange[⏳ {label}{suffix}]"
+    if status == "failed":
+        return f":red[✗ {label}{suffix}]"
+    return f":gray[○ {label}{suffix}]"
+
+
+def render_analysis_board(workspace: dict) -> None:
+    """Per-paper stage board: exactly where each analysis is right now."""
+    rows = workspace.get("analysis_board") or []
+    if not rows:
+        return
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(row.get("paper_id") or "", []).append(row)
+    for paper_id, paper_rows in groups.items():
+        title = paper_rows[0].get("paper_title")
+        if not title:
+            title = "综合分析报告" if paper_id == "" else "论文"
+        by_stage = {row["stage_key"]: row for row in paper_rows}
+        ordered = [
+            by_stage[key] for key in _ANALYSIS_STAGE_ORDER if key in by_stage
+        ]
+        ordered += [row for row in paper_rows if row not in ordered]
+        chips = [
+            _board_chip(
+                row["status"], row.get("label") or row["stage_key"],
+                row.get("done"), row.get("total"),
+            )
+            for row in ordered
+        ]
+        st.markdown(f"**{title}**")
+        st.markdown("  ".join(chips))
+
+
+def render_live_analysis_controls(project_id: str, workspace: dict) -> None:
+    """Running-analysis view: live board + cooperative pause."""
+    if workspace["user_stage"] in {"acquiring_selected", "analyzing_selected"}:
+        render_analysis_board(workspace)
+        if st.button(
+            "暂停分析",
+            icon=":material/pause:",
+            key=f"pause-analysis-{project_id}",
+            help="在当前图表或分析块结束后停下，已完成结果保留，之后可继续或局部重跑。",
+        ) and submit_action(project_id, {"type": "pause_analysis"}):
+            st.rerun()
+
+
+def render_paused_analysis(project_id: str, workspace: dict) -> None:
+    hint = workspace.get("budget_hint") or {}
+    hitl_events = workspace.get("hitl_events") or []
+    review_event = next(
+        (event for event in hitl_events if event.get("type") == "evidence_review_gate"),
+        None,
+    )
+    if review_event is not None:
+        st.warning(
+            "**合成前证据复核门**："
+            + (review_event.get("reason") or "存在被引用且自动存疑的证据，综合报告生成前需要你决定。")
+        )
+        if st.button(
+            "直接生成报告（跳过复核）",
+            type="primary",
+            icon=":material/skip_next:",
+            key=f"review-continue-{project_id}",
+        ) and submit_action(project_id, {"type": "review_gate_continue"}):
+            st.rerun()
+        st.caption(
+            "也可以先在下方「查看研究资料」卡片确认/存疑/排除争议证据，"
+            "再选择“先处理争议证据，再重新生成”。"
+        )
+        if st.button(
+            "先处理争议证据，再重新生成",
+            icon=":material/refresh:",
+            key=f"review-regenerate-{project_id}",
+        ) and submit_action(project_id, {"type": "review_gate_regenerate"}):
+            st.rerun()
+        return
+    if hint.get("gate_enabled"):
+        st.warning(
+            "已达成本门槛，分析在安全边界自动暂停（已完成结果全部保留）："
+            f"累计 token {hint.get('tokens_total', 0):,} / 阈值 {hint.get('gate_tokens', 0):,}"
+            f" · 视觉调用 {hint.get('vision_calls_total', 0)} / "
+            f"{hint.get('gate_vision_calls', 0)}"
+            f" · 已运行约 {hint.get('elapsed_minutes', 0)} / {hint.get('gate_minutes', 0)} 分钟。"
+        )
+    else:
+        st.warning("分析已在安全边界暂停，已完成的结果均已保存。")
+    render_analysis_board(workspace)
+    if st.button(
+        "继续分析",
+        type="primary",
+        icon=":material/play_arrow:",
+        key=f"resume-analysis-{project_id}",
+        help=(
+            "从停点续跑，已完成部分不会重复计算"
+            if not hint.get("gate_enabled")
+            else "放行剩余部分并从当前用量重新开始计量（成本门槛再次按新窗口计算）"
+        ),
+    ) and submit_action(project_id, {"type": "resume_analysis"}):
+        st.rerun()
+    render_partial_reanalysis(project_id, workspace)
+
+
+def render_partial_reanalysis(project_id: str, workspace: dict) -> None:
+    """Pick one paper block, add an extra requirement and re-run only that block."""
+    tokens = workspace.get("selected_paper_tokens") or []
+    if not tokens:
+        return
+    by_token = {
+        paper["paper_token"]: paper["title"]
+        for paper in (workspace.get("literature") or [])
+    }
+    labels = {token: by_token.get(token, "论文") for token in tokens}
+    with st.expander("重新分析某一部分（可补充要求）", expanded=False):
+        paper_token = st.selectbox(
+            "选择论文", list(tokens), format_func=labels.get,
+            key=f"part-paper-{project_id}",
+        )
+        part = st.selectbox(
+            "选择部分", [key for key, _ in _PART_CHOICES],
+            format_func=lambda key: _PART_LABELS[key],
+            key=f"part-key-{project_id}",
+        )
+        instruction = st.text_area(
+            "对该部分的补充要求（可选）",
+            placeholder="例如：方法部分请补充伪代码步骤和输入输出格式说明",
+            key=f"part-instruction-{project_id}",
+        )
+        submitted = st.button(
+            "提交局部重析",
+            type="primary",
+            icon=":material/tune:",
+            key=f"part-submit-{project_id}",
+            help="只重跑该部分（其余部分复用缓存），完成后重新生成综合分析报告。",
+        )
+        if not submitted:
+            return
+        payload = {
+            "type": "reanalyze_part", "paper_token": paper_token, "part": part,
+        }
+        if instruction.strip():
+            payload["instruction"] = instruction.strip()
+        if submit_action(project_id, payload):
+            st.session_state[f"workflow-view-{project_id}"] = 4
+            st.rerun()
 
 
 ACTION_RENDERERS = {
@@ -571,6 +920,13 @@ def render_workspace(project_id: str) -> None:
         render_retry(project_id, workspace)
     else:
         st.info(f"**{workspace['status_label']}** — {workspace['status_detail']}")
+    # Event-ized HITL (waiting_for_human): a waiting project holding an open
+    # hitl_event surfaces why it is parked and what the human can do next.
+    hitl_events = workspace.get("hitl_events") or []
+    if workspace.get("waiting_for_human") and hitl_events:
+        event = hitl_events[0]
+        reason = f"——{event['reason']}" if event.get("reason") else ""
+        st.warning(f"**待你决定**：{event['title']}{reason}")
     progress = workspace["progress"]
     st.caption(
         f"找到论文 {progress.get('found_papers', 0)} 篇 · "
@@ -593,6 +949,34 @@ def render_workspace(project_id: str) -> None:
         else:
             progress_text = progress.get("current_step") or "图表分析已完成"
         st.progress(completed_visuals / total_visuals, text=progress_text)
+    hint = workspace.get("budget_hint")
+    if hint and (hint.get("total_visuals") or hint.get("tokens_total")):
+        parts = []
+        if hint.get("total_visuals"):
+            parts.append(
+                f"已完成 {hint['completed_visuals']}/{hint['total_visuals']} 个图表视觉分析"
+                f"（剩余 {hint['remaining_visuals']} 个，每个还可能产生一致性/自动复核调用）"
+            )
+        if hint.get("tokens_total"):
+            parts.append(f"累计 token {hint['tokens_total']:,}")
+        if hint.get("vision_calls_total"):
+            parts.append(f"视觉调用 {hint['vision_calls_total']:,}")
+        hint_text = "预算：" + " · ".join(parts) + (
+            f" · 已运行约 {hint['elapsed_minutes']} 分钟"
+        )
+        if hint.get("warned"):
+            gate_note = (
+                "；超过成本门槛将自动暂停在安全边界，等你决定继续或中止"
+                if hint.get("gate_enabled") else "（仅提示，不自动中止）"
+            )
+            st.warning(
+                f"{hint_text}。提醒阈值：图表 ≥ {hint['warning_vision_calls']} 个"
+                f" 或时长 ≥ {hint['warning_minutes']} 分钟{gate_note}"
+            )
+        else:
+            st.caption(hint_text)
+    if workspace["user_stage"] in {"acquiring_selected", "analyzing_selected"}:
+        render_live_analysis_controls(project_id, workspace)
     if selected_stage == 1:
         render_project_setup(project_id, workspace)
     elif selected_stage == 2:
@@ -603,6 +987,8 @@ def render_workspace(project_id: str) -> None:
     else:
         if workspace.get("analysis_report"):
             render_analysis_report(project_id, workspace)
+        elif workspace["user_stage"] == "paused":
+            render_paused_analysis(project_id, workspace)
         elif workspace["user_stage"] != "failed":
             renderer = ACTION_RENDERERS.get(workspace["next_action"]["type"])
             if renderer:

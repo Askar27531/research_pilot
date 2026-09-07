@@ -1,0 +1,148 @@
+{
+  "model_checked": true,
+  "total": 6,
+  "status_accuracy": 1.0,
+  "decision_accuracy": 1.0,
+  "by_class": {
+    "consistent": {
+      "correct": 2,
+      "total": 2
+    },
+    "inconsistent": {
+      "correct": 2,
+      "total": 2
+    },
+    "unverifiable": {
+      "correct": 2,
+      "total": 2
+    }
+  },
+  "results": [
+    {
+      "id": "acc-consistent",
+      "chart": "acc",
+      "gold": "consistent",
+      "mention": "In Fig. 3, model A achieves higher accuracy than model B.",
+      "model_status": "consistent",
+      "statuses": [
+        "consistent"
+      ],
+      "decision": "confirmed",
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "consistent",
+          "visible_evidence": "The bar chart shows a bar for model A labeled 0.80 and a bar for model B labeled 0.50, with model A's bar taller than model B's bar.",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "acc-inconsistent",
+      "chart": "acc",
+      "gold": "inconsistent",
+      "mention": "In Fig. 3, model B achieves higher accuracy than model A.",
+      "model_status": "inconsistent",
+      "statuses": [
+        "inconsistent"
+      ],
+      "decision": "doubted",
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "inconsistent",
+          "visible_evidence": "Bar chart shows model A's accuracy is 0.80 and model B's accuracy is 0.50, so model A has higher accuracy than model B",
+          "note": "Statement claims B > A but actual chart shows A > B"
+        }
+      ]
+    },
+    {
+      "id": "acc-unverifiable",
+      "chart": "acc",
+      "gold": "unverifiable",
+      "mention": "The models shown in Fig. 3 were also evaluated on ImageNet.",
+      "model_status": "unverifiable",
+      "statuses": [
+        "unverifiable"
+      ],
+      "decision": null,
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "unverifiable",
+          "visible_evidence": "Figure 3 shows bar chart with values 0.80 and 0.50 for models A and B respectively, labeled 'Accuracy'. No text indicates evaluation on ImageNet.",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "trend-consistent",
+      "chart": "trend",
+      "gold": "consistent",
+      "mention": "Fig. 3 shows that the training metric keeps increasing over epochs.",
+      "model_status": "consistent",
+      "statuses": [
+        "consistent"
+      ],
+      "decision": "confirmed",
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "consistent",
+          "visible_evidence": "The figure clearly shows a monotonically increasing line from the 'start' point to the 'end' point, with the vertical axis labeled 'metric' and horizontal axis labeled 'epochs'.",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "trend-inconsistent",
+      "chart": "trend",
+      "gold": "inconsistent",
+      "mention": "Fig. 3 shows that the training metric decreases over epochs.",
+      "model_status": "inconsistent",
+      "statuses": [
+        "inconsistent"
+      ],
+      "decision": "doubted",
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "inconsistent",
+          "visible_evidence": "The graph shows a red line with a positive slope (increasing from left to right), labeled 'start' at the bottom-left and 'end' at the top-right.",
+          "note": "The training metric increases over epochs, contradicting the claim of decrease."
+        }
+      ]
+    },
+    {
+      "id": "trend-unverifiable",
+      "chart": "trend",
+      "gold": "unverifiable",
+      "mention": "The training set used for the run in Fig. 3 contains 100k samples.",
+      "model_status": "unverifiable",
+      "statuses": [
+        "unverifiable"
+      ],
+      "decision": null,
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "unverifiable",
+          "visible_evidence": "No information about training set sample count is visible in the figure. Only the axis labels 'metric' and 'epochs', and the plot showing a linear trend from 'start' to 'end' are present.",
+          "note": ""
+        }
+      ]
+    }
+  ]
+}

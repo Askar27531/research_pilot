@@ -19,6 +19,13 @@ class ProjectRecord(BaseModel):
     current_stage: str
     last_run_id: str | None = None
     error: dict[str, Any] | None = None
+    # Why a paused project is waiting: "user" (manual pause) or "budget_gate"
+    # (cost-threshold pause). None while not paused.
+    pause_reason: str | None = None
+    # M3 ReviewGate: human decision for the pre-synthesis evidence-review gate
+    # (None | "continue" | "regenerate_after_review"). Business-table truth the
+    # gate reads on re-entry, mirroring how the selection lives in DB.
+    analysis_review_decision: str | None = None
     created_at: datetime
     updated_at: datetime
     version: int = Field(ge=1)

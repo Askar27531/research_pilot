@@ -1,9 +1,26 @@
+from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
+from app.core.config import Settings
 from app.db.database import Database
 from app.db.errors import RecordNotFoundError
 from app.db.repositories import dump_json, load_json, utc_now
 from app.schemas import ResearchProfile, ResearchProfileInput, ResearchRequest
+
+
+def _elapsed_minutes(since: str | None, now: datetime | None = None) -> float:
+    """Wall-clock minutes between *since* (ISO) and now; 0 when unknown."""
+    if not since:
+        return 0.0
+    try:
+        started = datetime.fromisoformat(since)
+    except ValueError:
+        return 0.0
+    reference = now or datetime.now(UTC)
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return max(0.0, (reference - started).total_seconds() / 60.0)
 
 
 class ResearchDataRepository:
@@ -48,8 +65,16 @@ class ResearchDataRepository:
             await connection.commit()
         return project_id, job_id
 
-    async def review_evidence(self, project_id: str, evidence_id: str,
-                              status: str, note: str | None) -> None:
+    async def review_evidence(
+        self,
+        project_id: str,
+        evidence_id: str,
+        status: str,
+        note: str | None,
+        *,
+        source: str = "human",
+        review_session_id: str | None = None,
+    ) -> None:
         now = utc_now()
         async with self.database.connect() as connection:
             row = await (await connection.execute(
@@ -58,12 +83,241 @@ class ResearchDataRepository:
             if row is None:
                 raise RecordNotFoundError("Evidence not found")
             await connection.execute(
-                "INSERT INTO evidence_reviews(evidence_id,project_id,status,note,updated_at) "
-                "VALUES(?,?,?,?,?) ON CONFLICT(evidence_id) DO UPDATE SET "
-                "status=excluded.status,note=excluded.note,updated_at=excluded.updated_at",
-                (evidence_id, project_id, status, note, now),
+                "INSERT INTO evidence_reviews(evidence_id,project_id,status,note,source,"
+                "review_session_id,updated_at) VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(evidence_id) DO UPDATE SET "
+                "status=excluded.status,note=excluded.note,source=excluded.source,"
+                "review_session_id=excluded.review_session_id,updated_at=excluded.updated_at",
+                (evidence_id, project_id, status, note, source, review_session_id, now),
             )
             await connection.commit()
+
+    async def list_reviews(self, project_id: str) -> list[dict]:
+        """Return every evidence review row (decision desk provenance)."""
+        async with self.database.connect() as connection:
+            rows = await (await connection.execute(
+                "SELECT evidence_id,status,note,source,review_session_id,updated_at "
+                "FROM evidence_reviews WHERE project_id=?",
+                (project_id,),
+            )).fetchall()
+        return [dict(row) for row in rows]
+
+    async def is_pause_requested(self, project_id: str) -> bool:
+        """Cooperative pause flag checked at every safe analysis boundary."""
+        async with self.database.connect() as connection:
+            row = await (await connection.execute(
+                "SELECT pause_requested FROM projects WHERE id=?", (project_id,)
+            )).fetchone()
+        return bool(row and row["pause_requested"])
+
+    # --- M3 cost-threshold pause: usage ledger + budget windows ---
+
+    async def record_usage(
+        self,
+        project_id: str,
+        *,
+        phase: str | None = None,
+        kind: str,
+        model: str | None = None,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        latency_ms: int | None = None,
+    ) -> None:
+        """Append one metered LLM call (append-only audit row, FK-cascaded)."""
+        if kind not in {"text", "vision"}:
+            raise ValueError(f"Unknown usage kind: {kind}")
+        async with self.database.connect() as connection:
+            await connection.execute(
+                "INSERT INTO llm_usage(id,project_id,phase,kind,model,prompt_tokens,"
+                "completion_tokens,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (str(uuid4()), project_id, phase, kind, model,
+                 int(prompt_tokens), int(completion_tokens), latency_ms, utc_now()),
+            )
+            await connection.commit()
+
+    async def usage_totals(self, project_id: str) -> dict[str, Any]:
+        """Cumulative metered usage for one project (tokens/calls/vision/first_at)."""
+        async with self.database.connect() as connection:
+            row = await (await connection.execute(
+                "SELECT COALESCE(SUM(prompt_tokens+completion_tokens),0) AS tokens,"
+                " COUNT(*) AS calls,"
+                " COALESCE(SUM(CASE WHEN kind='vision' THEN 1 ELSE 0 END),0) AS vision_calls,"
+                " MIN(created_at) AS first_at FROM llm_usage WHERE project_id=?",
+                (project_id,),
+            )).fetchone()
+        return {
+            "tokens": int(row["tokens"]),
+            "calls": int(row["calls"]),
+            "vision_calls": int(row["vision_calls"]),
+            "first_at": row["first_at"],
+        }
+
+    async def budget_window(self, project_id: str) -> dict[str, Any]:
+        """Current allowance window for a project (defaults to an empty window)."""
+        async with self.database.connect() as connection:
+            row = await (await connection.execute(
+                "SELECT * FROM budget_windows WHERE project_id=?", (project_id,)
+            )).fetchone()
+        if row is None:
+            return {
+                "project_id": project_id, "baseline_tokens": 0, "baseline_vision": 0,
+                "since": None, "open": False, "opened_at": None, "snapshot": None,
+            }
+        return {
+            "project_id": row["project_id"],
+            "baseline_tokens": int(row["baseline_tokens"]),
+            "baseline_vision": int(row["baseline_vision"]),
+            "since": row["since"],
+            "open": bool(row["open"]),
+            "opened_at": row["opened_at"],
+            "snapshot": load_json(row["snapshot_json"]),
+        }
+
+    async def budget_pause_reason(self, project_id: str, settings: Settings) -> str | None:
+        """Decide at a safe boundary whether the analysis must stop.
+
+        Returns ``"user"`` when the human requested a cooperative pause (always
+        honoured, even with the gate disabled), ``"budget_gate"`` when a budget
+        *window* crossed a configured threshold (opening the gate once), else
+        ``None`` to keep running. Windows are re-baselined by
+        :meth:`ack_budget_gate`, so a human "continue" buys another full
+        threshold-sized block instead of re-pausing on the very next step.
+        """
+        if await self.is_pause_requested(project_id):
+            return "user"
+        if not settings.budget_gate_enabled:
+            return None
+        totals = await self.usage_totals(project_id)
+        window = await self.budget_window(project_id)
+        if window["open"]:
+            return None  # already parked at a budget pause; waiting for a human
+        elapsed = _elapsed_minutes(window["since"] or totals["first_at"])
+        exceeded = (
+            totals["tokens"] - window["baseline_tokens"] >= settings.budget_gate_tokens
+            or totals["vision_calls"] - window["baseline_vision"]
+            >= settings.budget_gate_vision_calls
+            or elapsed >= settings.budget_gate_minutes
+        )
+        if not exceeded:
+            return None
+        await self._open_budget_gate(project_id, totals, window)
+        return "budget_gate"
+
+    async def _open_budget_gate(self, project_id: str, totals: dict[str, Any],
+                                window: dict[str, Any]) -> None:
+        """Atomically mark the gate open and snapshot the triggering usage."""
+        now = utc_now()
+        since = window["since"] or totals["first_at"] or now
+        snapshot = dump_json({
+            "tokens": totals["tokens"], "vision_calls": totals["vision_calls"],
+            "calls": totals["calls"],
+        })
+        async with self.database.connect() as connection:
+            await connection.execute(
+                "INSERT INTO budget_windows(project_id,baseline_tokens,baseline_vision,"
+                "since,open,opened_at,snapshot_json) VALUES(?,?,?,?,1,?,?) "
+                "ON CONFLICT(project_id) DO UPDATE SET open=1,opened_at=excluded.opened_at,"
+                "snapshot_json=excluded.snapshot_json",
+                (project_id, window["baseline_tokens"], window["baseline_vision"],
+                 since, now, snapshot),
+            )
+            await connection.commit()
+
+    async def ack_budget_gate(self, project_id: str) -> None:
+        """Human "continue": close any open gate and re-baseline the window.
+
+        After an ack the window counts usage since *now*, so the next pause only
+        happens after another threshold-sized block of spend (soft supervisor,
+        not a per-step nag). Idempotent for every analysis-enqueueing action.
+        """
+        totals = await self.usage_totals(project_id)
+        async with self.database.connect() as connection:
+            await connection.execute(
+                "INSERT INTO budget_windows(project_id,baseline_tokens,baseline_vision,"
+                "since,open,opened_at,snapshot_json) VALUES(?,?,?,?,0,NULL,NULL) "
+                "ON CONFLICT(project_id) DO UPDATE SET baseline_tokens=excluded.baseline_tokens,"
+                "baseline_vision=excluded.baseline_vision,since=excluded.since,open=0,"
+                "opened_at=NULL,snapshot_json=NULL",
+                (project_id, totals["tokens"], totals["vision_calls"], utc_now()),
+            )
+            await connection.commit()
+
+    async def set_progress(
+        self,
+        project_id: str,
+        paper_id: str,
+        stage_key: str,
+        status: str,
+        *,
+        label: str | None = None,
+        done: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        """Upsert one cell of the structured per-(paper, stage) analysis board."""
+        now = utc_now()
+        async with self.database.connect() as connection:
+            await connection.execute(
+                "INSERT INTO analysis_progress(project_id,paper_id,stage_key,status,"
+                "label,done,total,updated_at) VALUES(?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(project_id,paper_id,stage_key) DO UPDATE SET "
+                "status=excluded.status,updated_at=excluded.updated_at,"
+                "label=COALESCE(excluded.label,analysis_progress.label),"
+                "done=COALESCE(excluded.done,analysis_progress.done),"
+                "total=COALESCE(excluded.total,analysis_progress.total)",
+                (project_id, paper_id, stage_key, status, label, done, total, now),
+            )
+            await connection.commit()
+
+    async def reset_progress_paper(self, project_id: str, paper_id: str,
+                                   stages: list[str]) -> None:
+        """Mark a paper's stages queued again (used right before a partial rerun)."""
+        if not stages:
+            return
+        markers = ",".join("?" for _ in stages)
+        async with self.database.connect() as connection:
+            await connection.execute(
+                f"UPDATE analysis_progress SET status='queued',done=0,updated_at=? "
+                f"WHERE project_id=? AND paper_id=? AND stage_key IN ({markers})",
+                (utc_now(), project_id, paper_id, *stages),
+            )
+            await connection.commit()
+
+    async def park_running_stages(self, project_id: str) -> None:
+        """After a pause, no stage may still read as ``running`` on the board."""
+        async with self.database.connect() as connection:
+            await connection.execute(
+                "UPDATE analysis_progress SET status='queued',updated_at=? "
+                "WHERE project_id=? AND status='running'",
+                (utc_now(), project_id),
+            )
+            await connection.commit()
+
+    async def list_progress(self, project_id: str) -> list[dict]:
+        async with self.database.connect() as connection:
+            rows = await (await connection.execute(
+                "SELECT * FROM analysis_progress WHERE project_id=? "
+                "ORDER BY paper_id,stage_key",
+                (project_id,),
+            )).fetchall()
+        return [dict(row) for row in rows]
+
+    async def reviewed_evidence_ids(self, project_id: str,
+                                    evidence_ids: list[str]) -> set[str]:
+        """Return evidence ids that already carry a human/automatic review.
+
+        Automatic passes only touch evidence that has never been decided, so they
+        never overwrite a human verdict on resume or re-analysis.
+        """
+        if not evidence_ids:
+            return set()
+        markers = ",".join("?" for _ in evidence_ids)
+        async with self.database.connect() as connection:
+            rows = await (await connection.execute(
+                f"SELECT evidence_id FROM evidence_reviews WHERE project_id=? "
+                f"AND status!='unreviewed' AND evidence_id IN ({markers})",
+                (project_id, *evidence_ids),
+            )).fetchall()
+        return {row["evidence_id"] for row in rows}
 
     async def review_counts(self, project_id: str) -> dict[str, int]:
         async with self.database.connect() as connection:
@@ -129,7 +383,7 @@ class ResearchDataRepository:
             rows = await (await connection.execute(
                 "SELECT d.*,p.id paper_id FROM documents d JOIN papers p ON p.id=d.paper_id "
                 "WHERE d.project_id=? AND NOT EXISTS (SELECT 1 FROM document_analyses a "
-                "WHERE a.document_id=d.id AND a.pipeline_version=2 AND a.input_hash=d.sha256 "
+                "WHERE a.document_id=d.id AND a.pipeline_version=3 AND a.input_hash=d.sha256 "
                 "AND a.status='completed')", (project_id,),
             )).fetchall()
         return [dict(row) for row in rows]
@@ -141,12 +395,12 @@ class ResearchDataRepository:
             await connection.execute(
                 "INSERT INTO document_analyses(id,project_id,document_id,pipeline_version,status,"
                 "vision_model,warnings_json,input_hash,created_at,updated_at) "
-                "VALUES(?,?,?,2,'running',?,'[]',?,?,?) ON CONFLICT(document_id,pipeline_version,input_hash) "
+                "VALUES(?,?,?,3,'running',?,'[]',?,?,?) ON CONFLICT(document_id,pipeline_version,input_hash) "
                 "DO UPDATE SET status='running',error_json=NULL,updated_at=excluded.updated_at",
                 (identifier, project_id, document_id, vision_model, input_hash, now, now),
             )
             row = await (await connection.execute(
-                "SELECT id FROM document_analyses WHERE document_id=? AND pipeline_version=2 AND input_hash=?",
+                "SELECT id FROM document_analyses WHERE document_id=? AND pipeline_version=3 AND input_hash=?",
                 (document_id, input_hash),
             )).fetchone()
             await connection.commit()
@@ -192,6 +446,21 @@ class ResearchDataRepository:
                  label, dump_json(bbox), source_path, source_hash, dump_json(payload), utc_now()),
             )
             await connection.commit()
+
+    async def visual_keys(self, analysis_id: str) -> set[str]:
+        """Keys of already-persisted visual regions of one analysis run.
+
+        A cooperative pause can therefore resume mid-document without re-paying
+        the vision calls for visuals that were finished before the pause.
+        """
+        async with self.database.connect() as connection:
+            rows = await (await connection.execute(
+                "SELECT region_type,page_number,label FROM visual_regions "
+                "WHERE analysis_id=?",
+                (analysis_id,),
+            )).fetchall()
+        return {f"{row['page_number']}|{row['region_type']}|{row['label'] or ''}"
+                for row in rows}
 
     async def visual_regions_for_document(
         self, project_id: str, document_id: str

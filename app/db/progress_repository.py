@@ -157,6 +157,27 @@ class WorkItemRepository:
             ).fetchall()
         return [self._record(row) for row in rows]
 
+    async def delete_part_items(
+        self, project_id: str, revision: int, paper_id: str, item_keys: list[str]
+    ) -> int:
+        """Force selected (paper, part) cache entries to re-run on the next pass.
+
+        Partial re-analysis deletes only these rows; every other part's cached
+        result is reused, so a targeted rerun costs one LLM call at most.
+        """
+        if not item_keys:
+            return 0
+        markers = ",".join("?" for _ in item_keys)
+        async with self.database.connect() as connection:
+            cursor = await connection.execute(
+                f"DELETE FROM work_items WHERE project_id=? AND item_type="
+                f"'paper_analysis_section' AND item_key IN ({markers}) "
+                f"AND run_scope LIKE ?",
+                (project_id, *item_keys, f"paper-analysis:{revision}:{paper_id}:%"),
+            )
+            await connection.commit()
+        return cursor.rowcount
+
     async def metrics(self, project_id: str) -> ProgressMetrics:
         items = await self.list_for_project(project_id)
         return ProgressMetrics(

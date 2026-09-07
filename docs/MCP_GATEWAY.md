@@ -53,7 +53,8 @@ researchpilot-mcp --server document --transport http --host 127.0.0.1 --port 810
 ```
 
 HTTP 默认仅绑定 `127.0.0.1`。绑定非回环地址时必须提供至少 24 字符的 `MCP_AUTH_TOKEN`，Server 将验证
-Bearer Token。HTTP Document MCP 只接受公共 `https://` PDF；STDIO 额外接受 `MCP_ALLOWED_ROOTS` 内的
+Bearer Token。也可以改用 GitHub OAuth 2.1 授权码 + PKCE 保护 HTTP 端点（`researchpilot-mcp --auth github`，
+无需静态令牌），完整配置与真实客户端联调步骤见 [MCP_OAUTH.md](MCP_OAUTH.md)。HTTP Document MCP 只接受公共 `https://` PDF；STDIO 额外接受 `MCP_ALLOWED_ROOTS` 内的
 `file://` 路径。路径穿越、根目录外 symlink、私网 URL、非 PDF 和超限文件都会被拒绝。
 
 ## Paper Intelligence 工具

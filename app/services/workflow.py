@@ -1,58 +1,37 @@
 from time import perf_counter
 from uuid import uuid4
 
-from app.agents import (
-    Coordinator,
-    EvidenceSynthesizer,
-    LiteratureResearcher,
-    PaperAnalyst,
-)
+from app.agents import Coordinator, LiteratureResearcher
 from app.db import (
     DocumentRepository,
     EvidenceRepository,
+    HitlEventRepository,
     PaperRepository,
     ProjectRepository,
     ResearchDataRepository,
     ResearchSessionRepository,
     TraceRepository,
     TransferRepository,
+    WorkflowJobRepository,
     WorkItemRepository,
 )
-from app.db.repositories import utc_now
-from app.documents.acquisition import OpenAccessDownloader
+from app.graph.analysis_graph import build_analysis_graph
+from app.graph.analysis_nodes import AnalysisGraphContext, AnalysisJobStop
 from app.literature import LiteratureToolClient
 from app.llm import OllamaProvider
-from app.schemas import AgentTask, PaperAcquisition, RankedPaper
-
-
-async def _resolve_open_access_url(literature, metadata) -> tuple[str | None, str | None]:
-    """Return a public PDF candidate, enriching DOI-only records through MCP."""
-    if metadata.open_access_url:
-        return str(metadata.open_access_url), None
-    if not metadata.doi:
-        return None, "检索元数据没有开放获取链接或 DOI，无法自动定位公开 PDF。"
-    try:
-        enriched = await literature.get_paper_metadata(metadata.doi)
-    except Exception as exc:  # noqa: BLE001 - manual upload remains the safe fallback
-        return None, f"已尝试通过 DOI 补查公开全文，但元数据查询失败：{exc}"
-    if enriched.open_access_url:
-        return str(enriched.open_access_url), None
-    return None, f"已通过 DOI {metadata.doi} 补查全文，但未发现开放获取 PDF。"
-
-
-def _arxiv_pdf_url(metadata) -> str | None:
-    """Return the canonical public PDF URL for an arXiv-sourced paper, if any."""
-    arxiv_id = metadata.arxiv_id or (
-        metadata.stable_id[len("arxiv:"):] if metadata.stable_id.startswith("arxiv:") else None
-    )
-    if not arxiv_id:
-        return None
-    identifier = arxiv_id.strip().rstrip("/").rsplit("/", 1)[-1]
-    return f"https://arxiv.org/pdf/{identifier}"
+from app.reliability.faults import AnalysisPausedError
+from app.schemas import AgentTask, RankedPaper
 
 
 class ResearchWorkflowService:
-    """Run durable paper-research jobs without depending on the HTTP layer."""
+    """Run durable paper-research jobs without depending on the HTTP layer.
+
+    Two LangGraph checkpointer-backed graphs share one ``AsyncSqliteSaver``:
+      - graph ① search_graph  (literature search; thread ``…:search-…:…``)
+      - graph ② analysis_graph (document analysis; thread ``…:analysis:…``)
+    Human waits are expressed as ``hitl_events`` (waiting_for_human); graph
+    nodes park the run and a resolving action enqueues a resume job.
+    """
 
     def __init__(self, app, literature: LiteratureToolClient) -> None:
         self.app = app
@@ -63,141 +42,131 @@ class ResearchWorkflowService:
         projects = ProjectRepository(database)
         project = await projects.get(job.project_id)
         resume = project.status in {"waiting", "failed"}
-        async with OllamaProvider() as provider:
+        research = ResearchDataRepository(database)
+
+        # Worker guard (event-ized HITL): while a project holds an open
+        # hitl_event (waiting_for_human), no queued/wake-up job may run — a
+        # human decision must resolve the event first (the resolving action
+        # enqueues the follow-up job itself). Auto-retries can never bypass it.
+        hitl = HitlEventRepository(database)
+        if await hitl.has_open(job.project_id):
+            open_events = await hitl.open_events(job.project_id)
+            await TraceRepository(database).append(
+                job.project_id,
+                f"gate-{job.run_id}",
+                "hitl_gate_skipped",
+                success=True,
+                agent="workflow_worker",
+                summary={
+                    "event_types": [event["type"] for event in open_events],
+                    "message": "open hitl_event exists; awaiting a human decision",
+                },
+            )
+            return
+
+        async def _record_usage(usage) -> None:
+            # Meter every successful provider call of this job into the run's
+            # append-only usage ledger (M3 cost-threshold pause).
+            await research.record_usage(
+                job.project_id, phase=job.job_type, kind=usage.kind,
+                model=usage.model, prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens, latency_ms=usage.latency_ms,
+            )
+
+        async with OllamaProvider(usage_sink=_record_usage) as provider:
             if job.job_type == "document_analysis":
-                await self._analyze_selected(job, provider, projects)
+                try:
+                    await self._run_analysis_graph(
+                        job, provider, projects, resume=resume
+                    )
+                except AnalysisPausedError as exc:
+                    # Cooperative pause (manual or cost gate): park the project at
+                    # a safe boundary and let the job finish without a failure.
+                    # Resume reuses every persisted unit (documents/visual
+                    # regions/work items). A budget pause is also recorded in
+                    # projects.pause_reason and as an open budget window so the
+                    # UI can tell it apart and re-baseline on "continue".
+                    reason = exc.reason or "user"
+                    await research.park_running_stages(job.project_id)
+                    await projects.reopen(job.project_id, "analysis_paused")
+                    await projects.set_pause_reason(job.project_id, reason)
+                    traces = TraceRepository(database)
+                    await traces.append(
+                        job.project_id,
+                        f"pause-{job.run_id}",
+                        "analysis_paused",
+                        success=True,
+                        agent="research_workflow",
+                        summary={"message": str(exc), "pause_reason": reason},
+                    )
                 return
             await self._run_research(job, provider, projects, resume=resume)
 
-    async def _analyze_selected(self, job, provider, projects: ProjectRepository) -> None:
+    async def _run_analysis_graph(
+        self, job, provider, projects: ProjectRepository, *, resume: bool
+    ) -> None:
+        """Drive the analysis LangGraph (graph ②) for one document_analysis job.
+
+        Run claim (start_run) lives here, before graph invocation, so resume /
+        parking semantics match the pre-graph worker. Business idempotency
+        (work_items.input_hash / visual_regions keys / persisted paper analyses)
+        makes every re-entry of the graph replay-safe.
+        """
         database = self.app.state.database
-        sessions = ResearchSessionRepository(database)
-        selection = await sessions.selection(job.project_id)
-        if not selection:
-            raise RuntimeError("No selected papers are ready for analysis")
-        project = await projects.get(job.project_id)
-        await projects.start_run(
-            job.project_id, job.run_id, resume=project.status in {"waiting", "failed"}
+        _, claimed = await projects.start_run(
+            job.project_id, job.run_id, resume=resume
         )
-        papers = PaperRepository(database)
-        documents = DocumentRepository(database)
-        evidence = EvidenceRepository(database)
-        research = ResearchDataRepository(database)
-        transfer = TransferRepository(database)
-        traces = TraceRepository(database)
-        document_service = self.app.state.document_service
-        acquisitions = {item.paper_id: item for item in await transfer.list_acquisitions(job.project_id)}
-        missing = False
-        for paper_id in selection["paper_ids"]:
-            paper = await papers.get(job.project_id, paper_id)
-            acquisition = acquisitions.get(paper_id)
-            if acquisition and acquisition.status == "parsed":
-                continue
-            source_url, discovery_error = await _resolve_open_access_url(
-                self.literature, paper.metadata
-            )
-            source_candidates = []
-            if source_url:
-                source_candidates.append(source_url)
-            arxiv_url = _arxiv_pdf_url(paper.metadata)
-            if arxiv_url and arxiv_url not in source_candidates:
-                source_candidates.append(arxiv_url)
-            acquisition = PaperAcquisition(
-                project_id=job.project_id, paper_id=paper_id, status="awaiting_upload",
-                source_url=source_url, error=discovery_error, updated_at=utc_now(),
-            )
-            failures: list[str] = []
-            for candidate in source_candidates:
-                try:
-                    await transfer.upsert_acquisition(
-                        acquisition.model_copy(update={"status": "downloading"})
-                    )
-                    content, final_url = await OpenAccessDownloader(
-                        document_service.workspace.max_document_bytes
-                    ).fetch(candidate)
-                    entry = document_service.workspace.import_pdf_bytes(
-                        job.project_id, f"{paper_id}.pdf", content
-                    )
-                    await self.app.state.document_capabilities.parse_document(
-                        job.project_id, entry.document_id, job.run_id
-                    )
-                    linked = await documents.register(job.project_id, paper_id, entry)
-                    acquisition = acquisition.model_copy(update={
-                        "status": "parsed", "source_url": final_url,
-                        "document_id": linked.document_id, "updated_at": utc_now(),
-                    })
-                    break
-                except Exception as exc:  # noqa: BLE001 - upload is the explicit fallback
-                    failures.append(
-                        f"{candidate}: {type(exc).__name__}: {str(exc)[:300]}"
-                    )
-                    acquisition = acquisition.model_copy(update={
-                        "status": "awaiting_upload",
-                        "error": "；".join(failures)[:1_000] if failures else discovery_error,
-                        "updated_at": utc_now(),
-                    })
-            await transfer.upsert_acquisition(acquisition)
-            missing = missing or acquisition.status != "parsed"
-        if missing:
-            await projects.wait(job.project_id, "awaiting_documents")
+        if not claimed:
             return
-
-        await projects.set_stage(job.project_id, "analyzing_selected")
-        analyst = PaperAnalyst(
-            provider,
-            document_service,
-            documents,
-            evidence,
-            research,
-            WorkItemRepository(database),
-            self.app.state.skill_registry,
-            traces,
+        ctx = AnalysisGraphContext(
+            database=database,
+            project_id=job.project_id,
+            run_id=job.run_id,
+            provider=provider,
+            projects=projects,
+            research=ResearchDataRepository(database),
+            sessions=ResearchSessionRepository(database),
+            papers=PaperRepository(database),
+            documents=DocumentRepository(database),
+            evidence=EvidenceRepository(database),
+            transfer=TransferRepository(database),
+            traces=TraceRepository(database),
+            items=WorkItemRepository(database),
+            document_service=self.app.state.document_service,
+            capabilities=self.app.state.document_capabilities,
+            skill_registry=self.app.state.skill_registry,
+            literature=self.literature,
+            checkpointer=self.app.state.checkpointer,
         )
-        analyses = await sessions.paper_analyses(job.project_id, selection["search_revision"])
-        completed = {item.paper_id for item in analyses}
-        for paper_id in selection["paper_ids"]:
-            if paper_id in completed:
-                continue
-            paper = await papers.get(job.project_id, paper_id)
-            linked = await documents.get_for_paper(job.project_id, paper_id)
-            await self.app.state.document_capabilities.parse_document(
-                job.project_id, linked.document_id, job.run_id
+        graph = build_analysis_graph(ctx)
+        thread_id = f"{job.project_id}:analysis:{job.run_id}"
+        try:
+            result = await graph.ainvoke(
+                {"project_id": job.project_id},
+                config={"configurable": {"thread_id": thread_id}},
             )
-            analysis = await analyst.run(
+        except AnalysisJobStop:
+            # Graceful park (e.g. document_unavailable): the waiting event is
+            # already recorded by the node; finish the job as a normal success.
+            return
+        if result.get("__interrupt__"):
+            # M2 SelectGate (and later M3 ReviewGate): a gate node parked the
+            # project (waiting + open hitl_event) and froze the graph on this
+            # thread. The resolving action re-enters with a fresh job whose
+            # gate reads the decision from the business tables.
+            await TraceRepository(database).append(
                 job.project_id,
-                selection["search_revision"],
-                paper,
-                linked,
-                project.goal,
-                selection["requirements"],
-                trace_id=f"job-{job.run_id}",
+                f"graph-{job.run_id}",
+                "graph_interrupt",
+                success=True,
+                agent="research_workflow",
+                summary={
+                    "thread_id": thread_id,
+                    "current_stage": (await projects.get(job.project_id)).current_stage,
+                    "interrupts": len(result["__interrupt__"]),
+                },
             )
-            await sessions.save_paper_analysis(
-                job.project_id, selection["search_revision"], analysis
-            )
-            analyses.append(analysis)
-        await EvidenceSynthesizer(provider, sessions).run(
-            job.project_id, selection["search_revision"], project.goal,
-            selection["requirements"], analyses,
-        )
-        await projects.complete(job.project_id, "analysis_review")
-
-    async def _analyze_pending_documents(self, project_id: str, provider) -> None:
-        from app.documents.analysis import DocumentAnalysisPipeline
-
-        database = self.app.state.database
-        research = ResearchDataRepository(database)
-        pipeline = DocumentAnalysisPipeline(
-            self.app.state.document_service,
-            DocumentRepository(database),
-            EvidenceRepository(database),
-            research,
-            provider,
-        )
-        for document in await research.pending_documents(project_id):
-            await pipeline.run(
-                project_id, document["paper_id"], document["id"], document["sha256"]
-            )
+            return
 
     async def _run_research(self, job, provider, projects, *, resume: bool) -> None:
         database = self.app.state.database
@@ -263,17 +232,27 @@ class ResearchWorkflowService:
             await sessions.complete_search(
                 job.project_id, search_session["revision"], plan, [item.id for item in stored]
             )
-            completed = await projects.wait(job.project_id, "paper_selection")
+            # M2: the analysis graph owns the paper-selection wait now. Park the
+            # project at the selection stage and hand over to a document_analysis
+            # job — its select_gate node freezes via interrupt() and opens the
+            # paper_selection hitl_event (no LLM spend while waiting).
+            await projects.reopen(job.project_id, "paper_selection")
+            follow_up = await WorkflowJobRepository(database).enqueue(
+                job.project_id, "document_analysis"
+            )
+            self.app.state.workflow_worker.wake()
             await traces.append(
                 job.project_id,
                 trace_id,
-                "research_completed" if completed.status == "completed" else "workflow_waiting",
+                "research_completed",
                 success=True,
                 agent="research_workflow",
                 latency_ms=round((perf_counter() - started) * 1000),
                 summary={
                     "selected_paper_count": 0,
-                    "current_stage": completed.current_stage,
+                    "current_stage": "paper_selection",
+                    "follow_up_job": follow_up.job_id,
+                    "pending_selection": True,
                 },
             )
         except Exception as exc:
@@ -292,4 +271,3 @@ class ResearchWorkflowService:
                 error={"type": type(exc).__name__, "message": str(exc)[:1_000]},
             )
             raise
-

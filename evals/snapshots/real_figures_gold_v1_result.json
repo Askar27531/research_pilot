@@ -1,0 +1,262 @@
+{
+  "model_checked": true,
+  "total": 12,
+  "status_accuracy": 1.0,
+  "decision_accuracy": 1.0,
+  "by_class": {
+    "consistent": {
+      "correct": 4,
+      "total": 4
+    },
+    "inconsistent": {
+      "correct": 4,
+      "total": 4
+    },
+    "unverifiable": {
+      "correct": 4,
+      "total": 4
+    }
+  },
+  "results": [
+    {
+      "id": "drone-succ-2uav-consistent",
+      "gold": "consistent",
+      "mention": "Fig. 5 plots the success probability over the training phase in the sparse scenario with 2 UAVs.",
+      "model_status": "consistent",
+      "statuses": [
+        "consistent"
+      ],
+      "decision": "confirmed",
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "consistent",
+          "visible_evidence": "The chart's title text explicitly states: 'Success probability over the training phase in the sparse scenario with 2 UAVs', matching the prose claim.",
+          "note": "Title of the figure matches the claim."
+        }
+      ]
+    },
+    {
+      "id": "drone-succ-2uav-inconsistent",
+      "gold": "inconsistent",
+      "mention": "Fig. 5 plots the episode length over the training phase in the sparse scenario with 2 UAVs.",
+      "model_status": "inconsistent",
+      "statuses": [
+        "inconsistent"
+      ],
+      "decision": "doubted",
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "inconsistent",
+          "visible_evidence": "Figure 5 shows y-axis labeled 'Successful episodes [%]', not 'episode length'",
+          "note": "The y-axis explicitly states 'Successful episodes [%]', contradicting the claim of 'episode length'"
+        }
+      ]
+    },
+    {
+      "id": "drone-succ-2uav-unverifiable",
+      "gold": "unverifiable",
+      "mention": "The UAVs in Fig. 5 are equipped with a different camera sensor than in the earlier experiments.",
+      "model_status": "unverifiable",
+      "statuses": [
+        "unverifiable"
+      ],
+      "decision": null,
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "unverifiable",
+          "visible_evidence": "The image shows a bar chart with 'Training episodes' on x-axis, 'Successful episodes [%]' on y-axis, and three methods: ε-greedy (orange), Softmax (green), and LA(4) (red line). There are no visible camera sensor details or any mention of UAV sensors in the chart.",
+          "note": "The statement refers to UAVs having different camera sensors, but the figure only displays performance metrics; no hardware or sensor information is visible."
+        }
+      ]
+    },
+    {
+      "id": "drone-cdf-3uav-consistent",
+      "gold": "consistent",
+      "mention": "Fig. 11 shows the empirical CDF of the episode duration in the sparse scenario with 3 UAVs.",
+      "model_status": "consistent",
+      "statuses": [
+        "consistent"
+      ],
+      "decision": "confirmed",
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "consistent",
+          "visible_evidence": "The image title and caption both state it is for the sparse scenario with 3 UAVs",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "drone-cdf-3uav-inconsistent",
+      "gold": "inconsistent",
+      "mention": "Fig. 11 shows the success probability rather than the episode-duration CDF.",
+      "model_status": "inconsistent",
+      "statuses": [
+        "inconsistent"
+      ],
+      "decision": "doubted",
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "inconsistent",
+          "visible_evidence": "图中明确标注Y轴为Probability（即成功概率），而X轴为Number of steps（步骤数）；数值趋势显示随步骤增加概率上升，符合CDF特征；图例包含DDQL等算法的对比曲线",
+          "note": "该句声称图显示\"success probability\"而非\"episode-duration CDF\"，但图Y轴标签为\"Probability\"，且通过数值和曲线形状（累积分布）可确认为CDF，故存在矛盾。"
+        }
+      ]
+    },
+    {
+      "id": "drone-cdf-3uav-unverifiable",
+      "gold": "unverifiable",
+      "mention": "The training runs in Fig. 11 used a discount factor of 0.99.",
+      "model_status": "unverifiable",
+      "statuses": [
+        "unverifiable"
+      ],
+      "decision": null,
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "unverifiable",
+          "visible_evidence": "No visible evidence of discount factor value in the image (axes labels, data points, or legend)。",
+          "note": "Image shows CDF plot with algorithm labels but no trace of discount factor parameter."
+        }
+      ]
+    },
+    {
+      "id": "actor-critic-consistent",
+      "gold": "consistent",
+      "mention": "FIGURE 2 depicts the actor and critic networks and their interaction for computing the weighted advantage.",
+      "model_status": "consistent",
+      "statuses": [
+        "consistent"
+      ],
+      "decision": "confirmed",
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "consistent",
+          "visible_evidence": "The figure clearly shows the Actor Network and Critic Network with arrows indicating the flow between them. The 'Stand' component is labeled and connected to the Actor Network, and the 'PMF of actions' is shown as a bar structure output from the Actor Network. The Critic Network is labeled with its output 'v^π(s_m;θ^v)' connected to the 'w_jA_j' component. The text 'hidden layers' is also explicitly written below the vertical bars of both networks.",
+          "note": "The figure matches the description in the prose as it visualizes the networks and their interaction."
+        }
+      ]
+    },
+    {
+      "id": "actor-critic-inconsistent",
+      "gold": "inconsistent",
+      "mention": "FIGURE 2 shows only the critic network without any actor component.",
+      "model_status": "inconsistent",
+      "statuses": [
+        "inconsistent"
+      ],
+      "decision": "doubted",
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "inconsistent",
+          "visible_evidence": "The image explicitly contains two networks labeled 'Actor Network' and 'Critic Network', with both having hidden layers and connections to other components.",
+          "note": "This statement directly contradicts the visible presence of both networks in the figure."
+        }
+      ]
+    },
+    {
+      "id": "actor-critic-unverifiable",
+      "gold": "unverifiable",
+      "mention": "The networks in FIGURE 2 were trained with a learning rate of 1e-4.",
+      "model_status": "unverifiable",
+      "statuses": [
+        "unverifiable"
+      ],
+      "decision": null,
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "unverifiable",
+          "visible_evidence": "The image shows a schematic of actor and critic networks with labels like 'hidden layers', 'PMF of actions', and mathematical notations for policy and value functions. There is no information about learning rate or training parameters.",
+          "note": "No visible content related to training hyperparameters (e.g., learning rate) is present in the figure."
+        }
+      ]
+    },
+    {
+      "id": "forest-drl-3x3-consistent",
+      "gold": "consistent",
+      "mention": "FIGURE 5 compares the obtained DRL solution with the optimal value for the 3x3 stands case.",
+      "model_status": "consistent",
+      "statuses": [
+        "consistent"
+      ],
+      "decision": "confirmed",
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "consistent",
+          "visible_evidence": "The figure's title is \"3X3 Stand Rewards\" and the legend shows three methods: DQN (green), Actor-Critic (blue), and Exact (red), which align with the description of \"obtained DRL solutions compared to the optimal value\" (where Exact likely represents the optimal value).",
+          "note": "The title and legend confirm the subject of comparison as DRL solutions versus a reference (Exact) for the 3x3 stands case, matching the prose statement."
+        }
+      ]
+    },
+    {
+      "id": "forest-drl-3x3-inconsistent",
+      "gold": "inconsistent",
+      "mention": "FIGURE 5 compares the obtained DRL solution with a random policy baseline for the 3x3 stands case.",
+      "model_status": "inconsistent",
+      "statuses": [
+        "inconsistent"
+      ],
+      "decision": "doubted",
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "inconsistent",
+          "visible_evidence": "The caption explicitly states the figure shows DRL solutions compared to the optimal value, yet the prose mention claims the figure compares DRL solutions to a random policy baseline. The visible evidence in the figure does not show any random policy baseline (no 'Random' line or marker), and the red line labeled 'Exact' corresponds to the optimal value per the caption. Therefore, the prose claim about a 'random policy baseline' is inconsistent with both the caption and the visible content of the figure.",
+          "note": "The caption (FIGURE 5) specifies comparison to optimal value, while the prose mentions a random policy baseline."
+        }
+      ]
+    },
+    {
+      "id": "forest-drl-3x3-unverifiable",
+      "gold": "unverifiable",
+      "mention": "The stands in FIGURE 5 were assumed to regenerate after harvest.",
+      "model_status": "unverifiable",
+      "statuses": [
+        "unverifiable"
+      ],
+      "decision": null,
+      "status_correct": true,
+      "decision_correct": true,
+      "checks_raw": [
+        {
+          "index": 1,
+          "status": "unverifiable",
+          "visible_evidence": "The chart displays '3X3 Stand Rewards' and shows reward curves over episodes for DQN, Actor-Critic, and Exact methods.",
+          "note": "The caption states the figure compares DRL solutions to optimal value, but the chart itself shows reward curves without explicit indication of regeneration mechanism or related information."
+        }
+      ]
+    }
+  ]
+}

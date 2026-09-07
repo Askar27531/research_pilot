@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "name": "real-figures-cross-modal-consistency-gold",
+  "curated": "v1.1",
+  "status": "final",
+  "note": "Curated after the v1 live run: removed figures whose parsed crops were caption-mismatched in the source workspace (forest-drl-10x10-ga, forest-timber-ages-100x100) and fixed the drone-cdf unverifiable sentence (an earlier one, 'limited to 2000 steps', was visibly contradicted by the axis; replaced with a hyperparameter not visible in the figure). Remaining items have image content consistent with their captions.",
+  "items": [
+    {
+      "id": "drone-succ-2uav",
+      "image": "data/workspaces/05af3cd4-a59e-4b53-bcb4-b23adc55cd48/parsed/1f92f4bf-eecb-45a8-b532-d1a0a2cabd71/figures/511de49f-9054-4ff3-a7ba-80193f5c1bc2.png",
+      "caption": "Fig. 5: Success probability over the training phase in the sparse scenario with 2 UAVs.",
+      "checks": [
+        {"gold": "consistent", "mention": "Fig. 5 plots the success probability over the training phase in the sparse scenario with 2 UAVs."},
+        {"gold": "inconsistent", "mention": "Fig. 5 plots the episode length over the training phase in the sparse scenario with 2 UAVs."},
+        {"gold": "unverifiable", "mention": "The UAVs in Fig. 5 are equipped with a different camera sensor than in the earlier experiments."}
+      ]
+    },
+    {
+      "id": "drone-cdf-3uav",
+      "image": "data/workspaces/05af3cd4-a59e-4b53-bcb4-b23adc55cd48/parsed/1f92f4bf-eecb-45a8-b532-d1a0a2cabd71/figures/691b57a0-aac9-4dda-a814-66b1d4243cfb.png",
+      "caption": "Fig. 11: CDF of the episode duration for different algorithms in the sparse scenario with 3 UAVs.",
+      "checks": [
+        {"gold": "consistent", "mention": "Fig. 11 shows the empirical CDF of the episode duration in the sparse scenario with 3 UAVs."},
+        {"gold": "inconsistent", "mention": "Fig. 11 shows the success probability rather than the episode-duration CDF."},
+        {"gold": "unverifiable", "mention": "The training runs in Fig. 11 used a discount factor of 0.99."}
+      ]
+    },
+    {
+      "id": "actor-critic",
+      "image": "data/workspaces/05af3cd4-a59e-4b53-bcb4-b23adc55cd48/parsed/81d2c2ee-5e9f-4853-93e3-b641c82483a5/figures/ec836edf-b76a-445e-b6a8-879c91ac9434.jpeg",
+      "caption": "FIGURE 2 | Actor and critic networks with their interaction to compute the weighted advantage that is needed for the gradients.",
+      "checks": [
+        {"gold": "consistent", "mention": "FIGURE 2 depicts the actor and critic networks and their interaction for computing the weighted advantage."},
+        {"gold": "inconsistent", "mention": "FIGURE 2 shows only the critic network without any actor component."},
+        {"gold": "unverifiable", "mention": "The networks in FIGURE 2 were trained with a learning rate of 1e-4."}
+      ]
+    },
+    {
+      "id": "forest-drl-3x3",
+      "image": "data/workspaces/05af3cd4-a59e-4b53-bcb4-b23adc55cd48/parsed/81d2c2ee-5e9f-4853-93e3-b641c82483a5/figures/9c341c94-eb02-4479-a4d7-ee35c01cd685.jpeg",
+      "caption": "FIGURE 5 | Obtained DRL solutions compared to the optimal value for the 3x3 stands case.",
+      "checks": [
+        {"gold": "consistent", "mention": "FIGURE 5 compares the obtained DRL solution with the optimal value for the 3x3 stands case."},
+        {"gold": "inconsistent", "mention": "FIGURE 5 compares the obtained DRL solution with a random policy baseline for the 3x3 stands case."},
+        {"gold": "unverifiable", "mention": "The stands in FIGURE 5 were assumed to regenerate after harvest."}
+      ]
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass
 from time import perf_counter
@@ -19,8 +20,10 @@ from app.db import (
 )
 from app.documents import DocumentService
 from app.documents.analysis import DocumentAnalysisPipeline
+from app.documents.parser import _section_type_for_title, analysis_pages
 from app.evidence import EvidenceBuilder
 from app.llm import LLMError, LLMProvider
+from app.reliability.faults import AnalysisPausedError
 from app.schemas import (
     AnalysisReport,
     ComparisonDraft,
@@ -35,10 +38,34 @@ from app.schemas import (
 )
 from app.skills import SkillRegistry
 
+logger = logging.getLogger(__name__)
+
 DraftT = TypeVar("DraftT", bound=BaseModel)
-ANALYSIS_PIPELINE_VERSION = 3
+ANALYSIS_PIPELINE_VERSION = 4
 CHUNK_SIZE = 950
 CHUNK_OVERLAP = 140
+
+# Semantic section routing: which section types each specialist should weight.
+# Complements (and progressively replaces) the coarse page-number heuristics.
+SECTION_TYPE_PREFS: dict[str, tuple[str, ...]] = {
+    "problem": ("abstract", "background"),
+    "method": ("method",),
+    "experiment": ("experiment",),
+    "critical": ("discussion", "experiment"),
+}
+
+#: Per-part granularity for analysis supervision: keys match the specialist
+#: blocks plus the overview, and double as analysis_progress stage keys.
+PART_LABELS: dict[str, str] = {
+    "problem": "问题与贡献",
+    "method": "方法与机制",
+    "experiment": "实验与结果",
+    "critical": "局限与相关性",
+    "overview": "综合概述",
+    "index": "建立全文证据索引",
+    "auto_verify": "自动复核图表证据结论",
+    "synthesis": "生成综合分析报告",
+}
 
 
 def _claims(value):
@@ -74,6 +101,36 @@ def _chunk_text(text: str) -> list[str]:
         if end >= len(source):
             break
         start = max(start + 1, end - CHUNK_OVERLAP)
+    return chunks
+
+
+_MARGIN_BLOCK_ROLES = {"header", "footer", "page_number"}
+
+
+def _chunks_for_page(page) -> list[str]:
+    """Chunk a page from its layout blocks instead of raw character windows.
+
+    Only body and caption blocks are evidence material; headings delimit runs so
+    a chunk never mixes paragraphs that are separated by a heading, and a heading
+    itself never becomes a supported quote. Runs stay contiguous in ``page.text``
+    (each piece is joined exactly like the parser joins kept blocks), so every
+    returned chunk is still a substring of ``page.text`` and text evidence
+    locators keep working.
+    """
+    blocks = page.blocks
+    if not blocks:  # legacy parsed JSON without blocks: fall back to page text
+        return _chunk_text(page.text)
+    stream = [block for block in blocks if block.role not in _MARGIN_BLOCK_ROLES]
+    chunks: list[str] = []
+    run: list[str] = []
+    for block in stream:
+        if block.role in {"body", "caption"}:
+            run.append(block.text)
+        elif run:
+            chunks.extend(_chunk_text("\n".join(run)))
+            run = []
+    if run:
+        chunks.extend(_chunk_text("\n".join(run)))
     return chunks
 
 
@@ -180,19 +237,39 @@ class PaperAnalyst:
         topic: str,
         requirements: str | None,
         trace_id: str | None = None,
+        part_instructions: dict[str, str] | None = None,
     ) -> PaperAnalysis:
         pipeline = DocumentAnalysisPipeline(
-            self.documents, self.document_repository, self.evidence, self.research, self.provider
+            self.documents, self.document_repository, self.evidence, self.research,
+            self.provider, skills=self.skills,
         )
+        overrides = part_instructions or {}
         pending = {item["id"] for item in await self.research.pending_documents(project_id)}
         if linked.document_id in pending:
             await pipeline.run(project_id, paper.id, linked.document_id, linked.sha256)
+        await self._pause_or_raise(project_id)
 
         await self.research.set_analysis_step(project_id, "正在建立全文证据索引")
+        await self.research.set_progress(
+            project_id, paper.id, "index", "running", label=PART_LABELS["index"]
+        )
         parsed = self.documents.get_structure(project_id, linked.document_id)
+        excluded = await self.evidence.excluded_ids(project_id)
         text_nodes = await self._build_full_text_index(project_id, paper.id, linked.document_id, parsed)
+        if excluded:
+            # Human-excluded evidence must not re-enter regeneration (decision
+            # desk closed loop); dropping them here makes _sanitize_evidence
+            # downgrade any claim whose only source was excluded.
+            text_nodes = [node for node in text_nodes if node.evidence_id not in excluded]
         all_evidence = await self.evidence.list_for_paper(project_id, paper.id, limit=500)
-        visual_nodes = [item for item in all_evidence if item.evidence_type != "text"]
+        visual_nodes = [
+            item for item in all_evidence
+            if item.evidence_type != "text" and item.evidence_id not in excluded
+        ]
+        await self.research.set_progress(
+            project_id, paper.id, "index", "completed", label=PART_LABELS["index"]
+        )
+        await self._pause_or_raise(project_id)
         allowed = {item.evidence_id for item in [*text_nodes, *visual_nodes]}
         method_skill = self.skills.load_skill("method-mechanism-extraction")
         if self.traces is not None:
@@ -223,15 +300,28 @@ class PaperAnalyst:
             await self.research.set_analysis_step(
                 project_id, f"正在深入分析第 {batch_start + 1}-{end}/4 部分"
             )
+            for spec in batch:
+                await self.research.set_progress(
+                    project_id, paper.id, spec.key, "running",
+                    label=PART_LABELS[spec.key],
+                )
+            await self._pause_or_raise(project_id)
             values = await asyncio.gather(*[
                 self._run_specialist(
                     semaphore, project_id, run_scope, paper, topic, requirements,
                     spec, text_nodes, visual_nodes, allowed,
                     method_skill.content if spec.key == "method" else None,
+                    overrides.get(spec.key),
                 )
                 for spec in batch
             ])
+            for spec in batch:
+                await self.research.set_progress(
+                    project_id, paper.id, spec.key, "completed",
+                    label=PART_LABELS[spec.key],
+                )
             drafts.update({spec.key: value for spec, value in zip(batch, values, strict=True)})
+            await self._pause_or_raise(project_id)
 
         draft = PaperAnalysis(
             paper_id=paper.id,
@@ -249,21 +339,101 @@ class PaperAnalyst:
         self._sanitize_evidence(draft, allowed)
 
         await self.research.set_analysis_step(project_id, "正在生成综合概述（5/5）")
+        await self.research.set_progress(
+            project_id, paper.id, "overview", "running", label=PART_LABELS["overview"]
+        )
+        await self._pause_or_raise(project_id)
         overview = await self._run_overview(
-            project_id, run_scope, paper, topic, requirements, draft, allowed
+            project_id, run_scope, paper, topic, requirements, draft, allowed,
+            overrides.get("overview"),
         )
         draft.overview = overview.overview
+        await self.research.set_progress(
+            project_id, paper.id, "overview", "completed", label=PART_LABELS["overview"]
+        )
         self._sanitize_evidence(draft, allowed)
+        await self.research.set_progress(
+            project_id, paper.id, "auto_verify", "running",
+            label=PART_LABELS["auto_verify"],
+        )
+        await self._pause_or_raise(project_id)
+        await self._auto_verify_visual_claims(
+            project_id, parsed, draft, visual_nodes, trace_id or f"paper-analysis:{project_id}"
+        )
+        await self.research.set_progress(
+            project_id, paper.id, "auto_verify", "completed",
+            label=PART_LABELS["auto_verify"],
+        )
         await self.research.set_analysis_step(project_id, "论文深度分析已完成")
         return draft
+
+    async def _pause_or_raise(self, project_id: str) -> None:
+        """Pause at a safe boundary; raises so the worker parks the run.
+
+        Honors both a human-requested pause and the cost-threshold gate
+        (M3): budget_pause_reason returns the first pending reason or None.
+        """
+        reason = await self.research.budget_pause_reason(project_id, self.settings)
+        if reason == "budget_gate":
+            raise AnalysisPausedError(
+                "已达运行预算门槛，分析已在安全边界暂停，等待人工决定是否继续",
+                reason="budget_gate",
+            )
+        if reason == "user":
+            raise AnalysisPausedError("用户请求暂停分析", reason="user")
+
+    async def _auto_verify_visual_claims(
+        self,
+        project_id: str,
+        parsed,
+        draft: PaperAnalysis,
+        visual_nodes: list[EvidenceNode],
+        trace_id: str,
+    ) -> None:
+        """Best-effort automatic visual review (figure/table evidence vs. claims).
+
+        Re-reads each cited visual crop with the claiming sentence and writes the
+        verdict into evidence_reviews, unless a human already decided that
+        evidence. Never fails the analysis job.
+        """
+        if not visual_nodes:
+            return
+        claims = [
+            (claim.value, list(claim.evidence_ids))
+            for claim in _claims(draft)
+            if claim.kind == "supported" and claim.evidence_ids
+        ]
+        if not claims:
+            return
+        try:
+            from app.evidence.visual_verifier import VisualEvidenceVerifier
+
+            evidence_by_id = {item.evidence_id: item for item in visual_nodes}
+            await self.research.set_analysis_step(project_id, "正在自动复核图表证据结论")
+            verifier = VisualEvidenceVerifier(
+                self.provider, self.documents, self.research,
+                skills=self.skills, traces=self.traces,
+            )
+            await verifier.verify_cited_visual_evidence(
+                project_id, parsed, claims, evidence_by_id, trace_id=trace_id
+            )
+        except Exception:  # noqa: BLE001 - auto review must never break the analysis
+            if self.traces is not None:
+                try:
+                    await self.traces.append(
+                        project_id, trace_id, "visual_verify", success=False,
+                        agent="visual_verifier", summary={"error": "auto review skipped"},
+                    )
+                except Exception:  # telemetry is best effort
+                    logger.debug("auto review trace failed", exc_info=True)
 
     async def _build_full_text_index(
         self, project_id: str, paper_id: str, document_id: str, parsed
     ) -> list[EvidenceNode]:
         builder = EvidenceBuilder(self.documents, self.document_repository, self.evidence)
         nodes: list[EvidenceNode] = []
-        for page in parsed.pages:
-            for position, quote in enumerate(_chunk_text(page.text), 1):
+        for page in analysis_pages(parsed):
+            for position, quote in enumerate(_chunks_for_page(page), 1):
                 nodes.append(await builder.build_text(project_id, TextEvidenceCreate(
                     paper_id=paper_id,
                     document_id=document_id,
@@ -289,6 +459,7 @@ class PaperAnalyst:
         visual_nodes: list[EvidenceNode],
         allowed: set[str],
         skill_content: str | None,
+        override: str | None = None,
     ) -> BaseModel:
         selected = self._select_evidence(spec, text_nodes, visual_nodes, topic)
         evidence_json = json.dumps([self._compact(item) for item in selected], ensure_ascii=False)
@@ -303,11 +474,12 @@ class PaperAnalyst:
             f"Apply this workflow skill:\n\n{skill_content}\n\n{base}"
             if skill_content else base
         )
+        extra = f"\n用户对该部分的补充要求：{override}" if override else ""
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": (
                 f"分析任务：{spec.label}\n具体要求：{spec.instructions}\n"
-                f"用户课题：{topic}\n用户分析要求：{requirements or '无额外要求'}\n"
+                f"用户课题：{topic}\n用户分析要求：{requirements or '无额外要求'}{extra}\n"
                 f"论文元数据：{paper.metadata.model_dump_json()}\n证据：{evidence_json}"
             )},
         ]
@@ -327,7 +499,9 @@ class PaperAnalyst:
     async def _run_overview(
         self, project_id: str, run_scope: str, paper, topic: str,
         requirements: str | None, draft: PaperAnalysis, allowed: set[str],
+        override: str | None = None,
     ) -> PaperOverviewDraft:
+        extra = f"\n用户对综合概述的补充要求：{override}" if override else ""
         messages = [
             {"role": "system", "content": (
                 "用简体中文撰写一段连贯的论文综合概述。必须用 5-8 个完整句子依次讲清研究问题、"
@@ -335,7 +509,7 @@ class PaperAnalyst:
                 "事实使用 supported 并引用输入中已有 evidence_id；综合判断使用 inference 且不引用证据。"
             )},
             {"role": "user", "content": (
-                f"用户课题：{topic}\n分析要求：{requirements or '无额外要求'}\n"
+                f"用户课题：{topic}\n分析要求：{requirements or '无额外要求'}{extra}\n"
                 f"论文：{paper.metadata.model_dump_json()}\n"
                 f"分项分析：{draft.model_dump_json()}"
             )},
@@ -403,6 +577,9 @@ class PaperAnalyst:
             content = f"{item.section or ''} {item.claim} {item.excerpt or ''}".casefold()
             value = sum(content.count(term.casefold()) * 2 for term in spec.keywords)
             value += sum(1 for term in topic_terms if term in content)
+            section_type = _section_type_for_title(item.section or "")
+            if section_type in SECTION_TYPE_PREFS[spec.key]:
+                value += 3
             page = item.page_number or 1
             if spec.key == "problem" and page <= 2:
                 value += 4

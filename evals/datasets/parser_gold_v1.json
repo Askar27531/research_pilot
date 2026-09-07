@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "document": "synthetic-method-paper",
+  "description": "Gold expectations for the stage-1 deterministic parser (figure region/caption, prose-mention index, semantic sections, header/page-number exclusion, references-page exclusion). The layout builder in evals/parser_gold.py renders a PDF that must satisfy these expectations.",
+  "pages": {
+    "figure_page": 1,
+    "mention_pages": [2, 3],
+    "references_page": 4
+  },
+  "figure": {
+    "label": "Fig. 1",
+    "page": 1,
+    "type": "architecture",
+    "caption": "Fig. 1 Architecture of the proposed framework."
+  },
+  "sections": [
+    {"title": "3 Method", "type": "method"},
+    {"title": "4 Experiments", "type": "experiment"},
+    {"title": "References", "type": "references"}
+  ],
+  "noise": {
+    "header": "Synthetic Journal of Nothing",
+    "expect_header_excluded": true,
+    "expect_page_numbers_removed": true,
+    "expect_references_page_excluded": true
+  }
+}

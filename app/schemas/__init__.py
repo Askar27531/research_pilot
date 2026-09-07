@@ -19,11 +19,13 @@ from app.schemas.analysis import (
 )
 from app.schemas.documents import (
     BoundingBox,
+    DocumentBlock,
     DocumentEntry,
     DocumentFigure,
     DocumentPage,
     DocumentSection,
     FigureInput,
+    FigureMention,
     PageInput,
     PaperAnalysisJob,
     PaperHandle,
@@ -34,18 +36,23 @@ from app.schemas.documents import (
     WorkspaceManifest,
 )
 from app.schemas.evidence import (
+    BlindVisualFacts,
     ClaimValue,
     CompactedContext,
     ComparisonCell,
     ComparisonRow,
+    CrossModalConsistencyReport,
     CrossPaperComparison,
     EvidenceNode,
     EvidenceSourcePreview,
     FigureEvidenceCreate,
     LinkedDocument,
     PaperSummary,
+    ProseConsistencyCheck,
     TableEvidenceCreate,
     TextEvidenceCreate,
+    VerificationRegion,
+    VisualVerificationVerdict,
 )
 from app.schemas.literature import (
     PaperAuthor,
@@ -64,6 +71,14 @@ from app.schemas.persistence import ProjectRecord, StoredPaper, TraceRecord
 from app.schemas.planning import ResearchUnderstanding
 from app.schemas.reliability import ProgressMetrics, TraceMetrics, WorkItemProgress
 from app.schemas.research import ResearchRequest
+from app.schemas.review import (
+    DeskClaimRef,
+    ReviewDesk,
+    ReviewDeskItem,
+    ReviewDeskStats,
+    ReviewPreviewRequest,
+    ReviewPreviewResult,
+)
 from app.schemas.transfer import PaperAcquisition, ResearchProfile, ResearchProfileInput
 from app.schemas.workspace import (
     MissingDocument,
@@ -89,6 +104,7 @@ __all__ = [
     "AgentTask",
     "AnalysisClaim",
     "AnalysisReport",
+    "BlindVisualFacts",
     "BoundingBox",
     "ClaimValue",
     "CompactedContext",
@@ -96,7 +112,10 @@ __all__ = [
     "ComparisonDraft",
     "ComparisonRow",
     "CriticalAnalysisDraft",
+    "CrossModalConsistencyReport",
     "CrossPaperComparison",
+    "DeskClaimRef",
+    "DocumentBlock",
     "DocumentEntry",
     "DocumentFigure",
     "DocumentPage",
@@ -106,6 +125,7 @@ __all__ = [
     "ExperimentAnalysisDraft",
     "FigureEvidenceCreate",
     "FigureInput",
+    "FigureMention",
     "Handoff",
     "LinkedDocument",
     "LoadedSkill",
@@ -132,6 +152,7 @@ __all__ = [
     "ProjectRecord",
     "ProjectSummary",
     "ProjectWorkspace",
+    "ProseConsistencyCheck",
     "RankedPaper",
     "ReanalyzeSelectedAction",
     "RegenerateSearchAction",
@@ -141,6 +162,11 @@ __all__ = [
     "ResearchUnderstanding",
     "ReselectPapersAction",
     "RetryAction",
+    "ReviewDesk",
+    "ReviewDeskItem",
+    "ReviewDeskStats",
+    "ReviewPreviewRequest",
+    "ReviewPreviewResult",
     "SearchPapersInput",
     "SearchQuery",
     "SearchQueryPlan",
@@ -154,7 +180,9 @@ __all__ = [
     "TraceMetrics",
     "TraceRecord",
     "UploadDocumentsAction",
+    "VerificationRegion",
     "VisualObservation",
+    "VisualVerificationVerdict",
     "WaitAction",
     "WorkItemProgress",
     "WorkflowJob",

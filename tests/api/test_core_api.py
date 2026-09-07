@@ -21,6 +21,8 @@ def test_openapi_exposes_only_core_workspace_paths() -> None:
         "/health", "/mcp/status", "/projects", "/projects/{project_id}",
         "/projects/{project_id}/workspace",
         "/projects/{project_id}/actions", "/projects/{project_id}/documents",
+        "/projects/{project_id}/review-desk",
+        "/projects/{project_id}/review-desk/preview",
         "/projects/{project_id}/resources/{token}",
     }
 

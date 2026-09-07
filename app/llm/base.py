@@ -1,10 +1,32 @@
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
 StructuredOutput = TypeVar("StructuredOutput", bound=BaseModel)
+
+
+@dataclass(frozen=True)
+class LLMCallUsage:
+    """One successful provider call, as observed at the HTTP response level.
+
+    ``prompt_tokens`` / ``completion_tokens`` come from Ollama's
+    ``prompt_eval_count`` / ``eval_count``; retried attempts are metered as the
+    real spend they are (each invalid-but-completed response already cost tokens).
+    """
+
+    kind: str  # "text" | "vision"
+    model: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    latency_ms: int | None = None
+
+
+#: Async sink receiving one row per successful provider call. The receiver owns
+#: the run context (project_id / phase); metering failures must never surface.
+UsageSink = Callable[[LLMCallUsage], Awaitable[None]]
 
 
 class LLMError(RuntimeError):

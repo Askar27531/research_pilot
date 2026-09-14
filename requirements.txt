@@ -1,0 +1,20 @@
+# ResearchPilot runtime dependencies.
+#
+# Install with:  python -m pip install -r requirements.txt
+#
+# The declarative source of truth is pyproject.toml; requirements-lock.txt is a
+# fully pinned snapshot of the complete dependency tree (pip freeze).
+
+fastapi>=0.116,<1
+fastmcp>=3.4,<4
+httpx>=0.28,<1
+langgraph>=0.6,<2
+langgraph-checkpoint-sqlite>=3.1,<4
+aiosqlite>=0.22,<1
+pydantic>=2.11,<3
+pydantic-settings>=2.10,<3
+python-dotenv>=1.1,<2
+python-multipart>=0.0.20,<1
+pymupdf>=1.26,<2
+streamlit[pdf]>=1.48,<2
+uvicorn[standard]>=0.35,<1

@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
-from app.db.errors import EvidenceReferencedError, ProjectConflictError, RecordNotFoundError
+from app.db.errors import ProjectConflictError, RecordNotFoundError
 from app.documents import (
     DocumentError,
     DocumentNotFoundError,
@@ -144,12 +144,6 @@ async def record_not_found_handler(request: Request, exc: RecordNotFoundError) -
 
 async def project_conflict_handler(request: Request, exc: ProjectConflictError) -> JSONResponse:
     return error_response(request, 409, "PROJECT_CONFLICT", str(exc), retryable=False)
-
-
-async def evidence_referenced_handler(
-    request: Request, exc: EvidenceReferencedError
-) -> JSONResponse:
-    return error_response(request, 409, "EVIDENCE_REFERENCED", str(exc), retryable=False)
 
 
 async def document_error_handler(request: Request, exc: DocumentError) -> JSONResponse:

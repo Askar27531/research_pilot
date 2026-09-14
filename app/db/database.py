@@ -3,11 +3,10 @@
 Layered table map (single database file, see settings.database_path):
 
 Domain data (user-visible research state)
-  projects / research_profiles / project_analysis_profiles  课题与画像
+  projects                                                课题与检索请求
   search_sessions / search_result_papers / papers           检索会话与命中论文
   paper_selections / paper_acquisitions / documents         选文、全文获取与登记
   evidence / visual_regions / evidence_reviews              证据、视觉区域与复核
-  paper_summaries / summary_evidence_refs                   逐篇摘要及其证据引用
   selected_paper_analyses / analysis_reports                逐篇分析与综合报告
   document_analyses                                         每篇 PDF 解析/图表分析管线
 
@@ -20,7 +19,7 @@ Reliability data (worker scheduling & idempotency)
 
 LangGraph runtime state (NOT created by migrations)
   checkpoints / writes  由 AsyncSqliteSaver 在应用启动时创建（app/main.py）。thread_id
-                        格式为 "{project_id}:search-{revision}:{track}"（见
+                        格式为 "{project_id}:search-{revision}"（见
                         app/agents/literature.py），因此可按 thread_id 前缀归属到项目；
                         ProjectRepository.delete 会在删除项目时一并清理这两个表的行，
                         避免孤儿 checkpoint 随项目增删无限累积。这两个表名由
@@ -34,7 +33,6 @@ Status-machine notes (each owns its own transitions; do not couple them casually
   paper_acquisitions.status pending/downloading/awaiting_upload/parsed/failed
   work_items.status        running/completed/failed（幂等工作项）
   evidence_reviews.status  unreviewed/confirmed/doubted/excluded（证据复核）
-  project_analysis_profiles.mode  legacy/paper_assistant_v2（历史分析模式兼容开关）
 
   document_analyses.total_visuals/completed_visuals/current_step 是 V10/V11 加入的
   视觉进度计数：total_visuals 在启动分析时置为区域总数，completed_visuals 从 0 随
@@ -52,7 +50,7 @@ from pathlib import Path
 
 import aiosqlite
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 MIGRATION_V1 = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -578,6 +576,39 @@ MIGRATION_V17 = """
 ALTER TABLE projects ADD COLUMN analysis_review_decision TEXT;
 """
 
+MIGRATION_V18 = """
+-- Dead-table cleanup (repo-wide audit, 2026-09): these tables have no live code
+-- path left —
+--   paper_summaries / summary_evidence_refs : legacy per-paper summaries whose
+--     writer (SummaryRepository.upsert) and schema cluster were removed;
+--   literature_searches                     : legacy search history whose only
+--     accessors (save_search / latest_searches) had no callers;
+--   project_analysis_profiles               : schema-only artifact (analysis
+--     mode flag of the removed legacy analysis path), never referenced.
+-- Older migrations that created them stay untouched (append-only history).
+DROP TABLE IF EXISTS paper_summaries;
+DROP TABLE IF EXISTS summary_evidence_refs;
+DROP TABLE IF EXISTS literature_searches;
+DROP TABLE IF EXISTS project_analysis_profiles;
+"""
+
+MIGRATION_V19 = """
+-- Method-transfer scope cut: the research_profile (problem statement / objectives
+-- / baseline / pain points) never fed a live consumer — the only readers were the
+-- edit-form round-trip (now reconstructed from projects.request_json constraints)
+-- and a dormant method-donor search track (removed). Older migrations that created
+-- it stay untouched (append-only history).
+DROP TABLE IF EXISTS research_profiles;
+"""
+
+MIGRATION_V20 = """
+-- search_sessions.status folded into plan_json: a search is "completed" iff plan_json
+-- is populated. The tri-state status (queued/completed/failed) duplicated
+-- workflow_jobs.status and 'failed' was never written, so drop the column and let
+-- callers infer completion from plan_json (NULL = pending).
+ALTER TABLE search_sessions DROP COLUMN status;
+"""
+
 
 class Database:
     def __init__(self, path: str | Path) -> None:
@@ -604,6 +635,9 @@ class Database:
             await self._apply(connection, 15, MIGRATION_V15)
             await self._apply(connection, 16, MIGRATION_V16)
             await self._apply(connection, 17, MIGRATION_V17)
+            await self._apply(connection, 18, MIGRATION_V18)
+            await self._apply(connection, 19, MIGRATION_V19)
+            await self._apply(connection, 20, MIGRATION_V20)
             await connection.commit()
 
     @staticmethod

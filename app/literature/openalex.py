@@ -118,13 +118,6 @@ class OpenAlexClient:
                 if not isinstance(payload, dict):
                     raise LiteratureResponseError("OpenAlex returned non-object JSON")
                 return payload
-            except (
-                OpenAlexAuthRequiredError,
-                PaperNotFoundError,
-                LiteratureRateLimitError,
-                LiteratureResponseError,
-            ):
-                raise
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 last_error = exc
                 if attempt < self.settings.openalex_max_attempts:

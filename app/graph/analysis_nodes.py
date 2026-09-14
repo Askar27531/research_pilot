@@ -115,6 +115,7 @@ def make_select_gate_node(ctx: AnalysisGraphContext):
             run_id=ctx.run_id,
         )
 
+    # Durable-Execution: 选文门(interrupt#1)：无选文时先落业务表(wait_for_human 置 waiting+open 事件)再 interrupt() 冻结图，等待期零 LLM 占用；人工 resolve 后同线程续跑，循环重读业务表放行（重新生成搜索则再次 park）。
     async def select_gate_node(state) -> dict:
         while True:
             selection = await ctx.sessions.selection(ctx.project_id)
@@ -200,9 +201,7 @@ def make_acquire_documents_node(ctx: AnalysisGraphContext):
                     entry = ctx.document_service.workspace.import_pdf_bytes(
                         project_id, f"{paper_id}.pdf", content
                     )
-                    await ctx.capabilities.parse_document(
-                        project_id, entry.document_id, ctx.run_id
-                    )
+                    await ctx.capabilities.parse_document(project_id, entry.document_id)
                     linked = await ctx.documents.register(project_id, paper_id, entry)
                     acquisition = acquisition.model_copy(update={
                         "status": "parsed", "source_url": final_url,
@@ -231,7 +230,6 @@ def make_acquire_documents_node(ctx: AnalysisGraphContext):
                 scope={"papers": missing_ids},
                 options=[
                     {"action": "upload_documents", "label": "上传 PDF 后继续"},
-                    {"action": "reselect_papers", "label": "换一批论文重新开始"},
                 ],
                 created_by="system",
                 run_id=ctx.run_id,
@@ -280,9 +278,7 @@ def make_analyze_papers_node(ctx: AnalysisGraphContext):
                 continue
             paper = await ctx.papers.get(project_id, paper_id)
             linked = await ctx.documents.get_for_paper(project_id, paper_id)
-            await ctx.capabilities.parse_document(
-                project_id, linked.document_id, ctx.run_id
-            )
+            await ctx.capabilities.parse_document(project_id, linked.document_id)
             analysis = await analyst.run(
                 project_id,
                 revision,

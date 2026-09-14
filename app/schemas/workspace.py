@@ -57,6 +57,9 @@ class WorkspaceProgress(BaseModel):
     total_visuals: int = 0
     completed_visuals: int = 0
     current_step: str | None = None
+    # Which visual is being analyzed right now: page + figure/table ordinal
+    # (drives the fine-grained "第几页 · 第几个图/表" progress line).
+    current_visual: dict[str, Any] | None = None
 
 
 class ProjectWorkspace(BaseModel):
@@ -74,6 +77,14 @@ class ProjectWorkspace(BaseModel):
     selected_paper_tokens: list[str] = Field(default_factory=list, max_length=2)
     analysis_requirements: str | None = None
     analysis_report: dict[str, Any] | None = None
+    # Incremental analysis surface (no longer waits for the final report):
+    # - analysis_papers: the selected papers with their live PDF handles
+    #   (available as soon as full text is acquired, even before synthesis).
+    # - analysis_blocks: per-(paper, part) analysis blocks with status, so the
+    #   UI can render each finished part as it lands and show placeholders for
+    #   the rest while the run is still going.
+    analysis_papers: list[dict[str, Any]] = Field(default_factory=list)
+    analysis_blocks: list[dict[str, Any]] = Field(default_factory=list)
     evidence_review: dict[str, int] = Field(default_factory=dict)
     high_risk_review_count: int = 0
     budget_hint: dict[str, Any] | None = None
@@ -137,10 +148,6 @@ class RegenerateSearchAction(BaseModel):
     instruction: str | None = Field(default=None, min_length=3, max_length=4_000)
 
 
-class ReselectPapersAction(BaseModel):
-    type: Literal["reselect_papers"]
-
-
 class SelectPapersAction(BaseModel):
     type: Literal["select_papers"]
     paper_tokens: list[str] = Field(min_length=1, max_length=2)
@@ -186,7 +193,7 @@ class ReanalyzePartAction(BaseModel):
 
 WorkspaceActionRequest = Annotated[
     RunWorkspaceAction | EvidenceReviewWorkspaceAction | RegenerateSearchAction
-    | ReselectPapersAction | SelectPapersAction | ReanalyzeSelectedAction
+    | SelectPapersAction | ReanalyzeSelectedAction
     | PauseAnalysisAction | ResumeAnalysisAction | ReanalyzePartAction
     | ReviewGateContinueAction | ReviewGateRegenerateAction,
     Field(discriminator="type"),

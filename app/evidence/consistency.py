@@ -100,12 +100,10 @@ class CrossModalConsistencyChecker:
         """Run the consistency scan for one visual evidence.
 
         Returns counts; never raises for model/IO failures. Does not write
-        anything when the evidence already has a review, when the provider has no
-        vision method, or when the visual has no prose mentions.
+        anything when the evidence already has a review or the visual has no
+        prose mentions.
         """
         summary = {"consistent": 0, "inconsistent": 0, "unverifiable": 0, "checked": 0}
-        if not hasattr(self.provider, "structured_output_with_images"):
-            return summary
         path, caption, mentions = resolve_visual_source(
             self.documents, project_id, parsed, node
         )

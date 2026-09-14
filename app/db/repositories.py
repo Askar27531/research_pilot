@@ -75,6 +75,7 @@ class ProjectRepository:
             )).fetchall()
         return [self._to_record(row) for row in rows]
 
+    # Durable-Execution: 删除项目：先拒绝仍有活动任务的项目；按 thread_id 前缀清理本项目 LangGraph checkpoints/writes 线程，避免孤儿快照随项目增删无限累积（两表无外键，需手动清）。
     async def delete(self, project_id: str) -> None:
         """Delete a project and all database records linked through foreign keys."""
         async with self.database.connect() as connection:
@@ -123,6 +124,7 @@ class ProjectRepository:
             await connection.commit()
         return await self.get(project_id)
 
+    # Durable-Execution: run 级幂等认领 + resume 守卫：completed 项目直接 no-op；同 run_id 再次触发 no-op（防同一条 run 被执行两遍）；resume 只允许 waiting/failed 项目，失败项目必须走 resume。
     async def start_run(
         self,
         project_id: str,
@@ -183,6 +185,7 @@ class ProjectRepository:
             await connection.commit()
         return await self.get(project_id)
 
+    # Durable-Execution: 任务结束或人工门落定时把项目置 waiting + 新阶段，作为下一次 resume 的可恢复断点状态。
     async def reopen(self, project_id: str, current_stage: str) -> ProjectRecord:
         async with self.database.connect() as connection:
             cursor = await connection.execute(

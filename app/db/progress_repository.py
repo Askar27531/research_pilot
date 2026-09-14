@@ -10,6 +10,7 @@ class WorkItemRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
+    # Durable-Execution: 幂等单元核心：BEGIN IMMEDIATE 下原子“查-判-写”——completed 直接返回缓存(claimed=False，调用方零 token)；running/failed 置回 running 且 attempts+1 重跑；input_hash 不同默认抛冲突，replace_changed=True 时允许重置重跑（改要求后只重做该单元）。
     async def claim(
         self,
         project_id: str,
@@ -78,6 +79,7 @@ class WorkItemRepository:
             await connection.commit()
         return await self.get(project_id, run_scope, item_key), True
 
+    # Durable-Execution: 成功落库 result_json——本行即该单元的“已付费章”，此后任何重试/续跑直接复用缓存，模型不再被调。
     async def complete(
         self,
         project_id: str,
@@ -90,6 +92,7 @@ class WorkItemRepository:
             project_id, run_scope, item_key, "completed", result, None, latency_ms
         )
 
+    # Durable-Execution: 失败落库错误快照；下次 claim 会 attempts+1 重新执行（失败重试本身，不是重复消耗）。
     async def fail(
         self,
         project_id: str,
@@ -157,6 +160,7 @@ class WorkItemRepository:
             ).fetchall()
         return [self._record(row) for row in rows]
 
+    # Durable-Execution: 局部重析：只删除目标 (paper, part) 的缓存行，其余 part 行原样复用——“只重跑被改的那一个部分”，最多付一次 LLM 调用。
     async def delete_part_items(
         self, project_id: str, revision: int, paper_id: str, item_keys: list[str]
     ) -> int:
@@ -177,6 +181,37 @@ class WorkItemRepository:
             )
             await connection.commit()
         return cursor.rowcount
+
+    # Durable-Execution: 增量视图：取某论文当前 revision 各 part 的 completed 缓存，供运行中 UI 实时渲染（论文还没分析完就能看到已完成部分），并按 updated_at 保证多指纹下不串 run。
+    async def analysis_sections(
+        self, project_id: str, revision: int, paper_id: str
+    ) -> dict[str, dict]:
+        """Completed per-part analysis results for one paper's current revision.
+
+        Returns ``{item_key: {...draft...}}`` for every finished
+        ``paper_analysis_section`` item whose value belongs to the latest
+        ``paper-analysis:<revision>:<paper_id>:*`` run. When several
+        fingerprints exist we keep the most recently updated row per part so the
+        incremental view never mixes two runs. Used to render analysis content
+        *while* the run is still in progress.
+        """
+        async with self.database.connect() as connection:
+            rows = await (await connection.execute(
+                "SELECT item_key,status,result_json,updated_at FROM work_items "
+                "WHERE project_id=? AND item_type='paper_analysis_section' "
+                "AND run_scope LIKE ?",
+                (project_id, f"paper-analysis:{revision}:{paper_id}:%"),
+            )).fetchall()
+        latest: dict[str, dict] = {}
+        for row in rows:
+            key = row["item_key"]
+            if key not in latest or row["updated_at"] > latest[key]["updated_at"]:
+                latest[key] = dict(row)
+        result: dict[str, dict] = {}
+        for key, row in latest.items():
+            if row["status"] == "completed" and row["result_json"]:
+                result[key] = load_json(row["result_json"])
+        return result
 
     async def metrics(self, project_id: str) -> ProgressMetrics:
         items = await self.list_for_project(project_id)

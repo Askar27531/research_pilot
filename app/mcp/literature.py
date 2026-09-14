@@ -160,7 +160,6 @@ class LiteratureCapabilityClient:
     async def _search(
         self, capability: str, query: str, year_from: int | None,
         year_to: int | None, limit: int, sources: Sequence[str],
-        trace_id: str | None,
     ) -> SearchResult:
         canonical = {
             "query": query, "year_from": year_from, "year_to": year_to,
@@ -178,18 +177,15 @@ class LiteratureCapabilityClient:
                 capability,
                 canonical,
                 {"external-arxiv": external},
-                {"trace_id": trace_id},
                 result_adapter=lambda result: normalize_arxiv_search(result, query),
             )
             return value
-        value = await self.router.call(
-            capability, canonical, {"external-arxiv": external}, {"trace_id": trace_id}
-        )
+        value = await self.router.call(capability, canonical, {"external-arxiv": external})
         return SearchResult.model_validate(value)
 
     async def search_papers(
         self, query: str, year_from: int | None = None, year_to: int | None = None,
-        limit: int = 20, trace_id: str | None = None,
+        limit: int = 20,
         sources: list[str] | None = None,
     ) -> SearchResult:
         selected = list(sources or ["openalex", "crossref", "arxiv"])
@@ -198,11 +194,10 @@ class LiteratureCapabilityClient:
         if non_arxiv:
             tasks.append(self._search(
                 "literature.search.multisource", query, year_from, year_to, limit, non_arxiv,
-                trace_id,
             ))
         if "arxiv" in selected:
             tasks.append(self._search(
-                "literature.search.arxiv", query, year_from, year_to, limit, ["arxiv"], trace_id
+                "literature.search.arxiv", query, year_from, year_to, limit, ["arxiv"]
             ))
         results = await asyncio.gather(*tasks, return_exceptions=True)
         valid = [result for result in results if isinstance(result, SearchResult)]

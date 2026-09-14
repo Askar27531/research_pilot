@@ -7,7 +7,7 @@ from app.documents.errors import (
     DocumentValidationError,
 )
 from app.documents.parser import PDFParser
-from app.documents.service import DocumentService
+from app.documents.service import DocumentService, create_document_service
 from app.documents.workspace import WorkspaceManager
 
 __all__ = [
@@ -20,4 +20,5 @@ __all__ = [
     "OpenAccessDownloader",
     "PDFParser",
     "WorkspaceManager",
+    "create_document_service",
 ]

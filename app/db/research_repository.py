@@ -6,7 +6,7 @@ from app.core.config import Settings
 from app.db.database import Database
 from app.db.errors import RecordNotFoundError
 from app.db.repositories import dump_json, load_json, utc_now
-from app.schemas import ResearchProfile, ResearchProfileInput, ResearchRequest
+from app.schemas import ResearchRequest
 
 
 def _elapsed_minutes(since: str | None, now: datetime | None = None) -> float:
@@ -23,6 +23,23 @@ def _elapsed_minutes(since: str | None, now: datetime | None = None) -> float:
     return max(0.0, (reference - started).total_seconds() / 60.0)
 
 
+def _doc_scope(document_ids: list[str] | None) -> tuple[str, list]:
+    """SQL fragment + params to restrict a metrics query to *document_ids*.
+
+    ``None`` means "no scope filter" (project-wide). An *empty* list means "the
+    scoped set is empty" and is signalled by returning a filter of ``None`` so
+    callers can short-circuit to zero results instead of building ``IN ()``.
+    """
+    if document_ids is None:
+        return "", []
+    doc_ids = list(dict.fromkeys(document_ids))
+    if not doc_ids:
+        return None, []
+    markers = ",".join("?" for _ in doc_ids)
+    return f" AND document_id IN ({markers})", doc_ids
+
+
+
 class ResearchDataRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -31,19 +48,10 @@ class ResearchDataRepository:
         self,
         name: str,
         request: ResearchRequest,
-        profile_input: ResearchProfileInput,
     ) -> tuple[str, str]:
-        """Create the project, profile and first job in one transaction."""
-        project_id, profile_id, job_id = str(uuid4()), str(uuid4()), str(uuid4())
+        """Create the project and its first job in one transaction."""
+        project_id, job_id = str(uuid4()), str(uuid4())
         now = utc_now()
-        profile = ResearchProfile(
-            **profile_input.model_dump(),
-            profile_id=profile_id,
-            project_id=project_id,
-            revision=1,
-            created_at=now,
-            updated_at=now,
-        )
         async with self.database.connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             await connection.execute(
@@ -51,11 +59,6 @@ class ResearchDataRepository:
                 "created_at,updated_at,version) VALUES(?,?,?,?,'created','initialized',?,?,1)",
                 (project_id, name.strip(), request.research_question,
                  request.model_dump_json(), now, now),
-            )
-            await connection.execute(
-                "INSERT INTO research_profiles(id,project_id,revision,payload_json,created_at,updated_at) "
-                "VALUES(?,?,1,?,?,?)",
-                (profile_id, project_id, profile.model_dump_json(), now, now),
             )
             await connection.execute(
                 "INSERT INTO workflow_jobs(id,project_id,run_id,status,attempts,created_at,"
@@ -255,6 +258,11 @@ class ResearchDataRepository:
     ) -> None:
         """Upsert one cell of the structured per-(paper, stage) analysis board."""
         now = utc_now()
+        # ``done`` is NOT NULL in analysis_progress. Stage rows that are not a
+        # counted board (e.g. the per-paper specialist/overview/index stages)
+        # may omit it; coerce None -> 0 so a first-time INSERT never violates
+        # the constraint. Counting stages (visuals) pass a real value.
+        done_value = 0 if done is None else done
         async with self.database.connect() as connection:
             await connection.execute(
                 "INSERT INTO analysis_progress(project_id,paper_id,stage_key,status,"
@@ -264,21 +272,7 @@ class ResearchDataRepository:
                 "label=COALESCE(excluded.label,analysis_progress.label),"
                 "done=COALESCE(excluded.done,analysis_progress.done),"
                 "total=COALESCE(excluded.total,analysis_progress.total)",
-                (project_id, paper_id, stage_key, status, label, done, total, now),
-            )
-            await connection.commit()
-
-    async def reset_progress_paper(self, project_id: str, paper_id: str,
-                                   stages: list[str]) -> None:
-        """Mark a paper's stages queued again (used right before a partial rerun)."""
-        if not stages:
-            return
-        markers = ",".join("?" for _ in stages)
-        async with self.database.connect() as connection:
-            await connection.execute(
-                f"UPDATE analysis_progress SET status='queued',done=0,updated_at=? "
-                f"WHERE project_id=? AND paper_id=? AND stage_key IN ({markers})",
-                (utc_now(), project_id, paper_id, *stages),
+                (project_id, paper_id, stage_key, status, label, done_value, total, now),
             )
             await connection.commit()
 
@@ -329,46 +323,33 @@ class ResearchDataRepository:
         result.update({row["status"]: row["count"] for row in rows})
         return result
 
-    async def save_search(self, project_id: str, query: str, sources: list[str],
-                          result_count: int, warnings: list[str], latency_ms: int) -> None:
-        async with self.database.connect() as connection:
-            await connection.execute(
-                "INSERT INTO literature_searches(id,project_id,query,sources_json,result_count,"
-                "warnings_json,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (str(uuid4()), project_id, query, dump_json(sources), result_count,
-                 dump_json(warnings), latency_ms, utc_now()),
-            )
-            await connection.commit()
-
-    async def latest_searches(self, project_id: str, limit: int = 10) -> list[dict]:
-        async with self.database.connect() as connection:
-            rows = await (await connection.execute(
-                "SELECT * FROM literature_searches WHERE project_id=? ORDER BY created_at DESC LIMIT ?",
-                (project_id, limit),
-            )).fetchall()
-        return [{**dict(row), "sources": load_json(row["sources_json"]),
-                 "warnings": load_json(row["warnings_json"])} for row in rows]
-
-    async def analysis_metrics(self, project_id: str) -> dict[str, int | str | None]:
+    async def analysis_metrics(self, project_id: str,
+                               document_ids: list[str] | None = None) -> dict[str, int | str | None]:
+        doc_filter, doc_params = _doc_scope(document_ids)
+        if doc_filter is None:
+            return {
+                "analyzed_pages": 0, "analyzed_visuals": 0, "total_visuals": 0,
+                "completed_visuals": 0, "current_step": None,
+            }
         async with self.database.connect() as connection:
             page_row = await (await connection.execute(
                 "SELECT COALESCE(SUM(page_count),0) pages FROM ("
                 "SELECT document_id,MAX(page_count) page_count FROM document_analyses "
-                "WHERE project_id=? AND status='completed' GROUP BY document_id)",
-                (project_id,),
+                f"WHERE project_id=? AND status='completed'{doc_filter} GROUP BY document_id)",
+                (project_id, *doc_params),
             )).fetchone()
             region_row = await (await connection.execute(
-                "SELECT COUNT(*) regions FROM visual_regions WHERE project_id=?",
-                (project_id,),
+                f"SELECT COUNT(*) regions FROM visual_regions WHERE project_id=?{doc_filter}",
+                (project_id, *doc_params),
             )).fetchone()
             progress_row = await (await connection.execute(
                 "SELECT COALESCE(SUM(total_visuals),0) total_visuals,"
                 "COALESCE(SUM(completed_visuals),0) completed_visuals,MAX(current_step) current_step "
-                "FROM document_analyses WHERE project_id=? AND id IN ("
+                f"FROM document_analyses WHERE project_id=? AND id IN ("
                 "SELECT id FROM document_analyses current WHERE current.project_id=? "
                 "AND current.updated_at=(SELECT MAX(latest.updated_at) FROM document_analyses latest "
-                "WHERE latest.document_id=current.document_id))",
-                (project_id, project_id),
+                f"WHERE latest.document_id=current.document_id)){doc_filter}",
+                (project_id, project_id, *doc_params),
             )).fetchone()
         return {
             "analyzed_pages": page_row["pages"],
@@ -461,6 +442,27 @@ class ResearchDataRepository:
             )).fetchall()
         return {f"{row['page_number']}|{row['region_type']}|{row['label'] or ''}"
                 for row in rows}
+
+    async def running_visual_analysis(self, project_id: str,
+                                      document_ids: list[str] | None = None) -> dict | None:
+        """The document-analysis run currently doing visual observation.
+
+        Drives the "which page / which figure or table is being analyzed"
+        line in the UI; None when no visual pass is in flight. When
+        ``document_ids`` is given it is restricted to the current selection so a
+        superseded paper's still-running pass never shows up as "current".
+        """
+        doc_filter, doc_params = _doc_scope(document_ids)
+        if doc_filter is None:
+            return None
+        async with self.database.connect() as connection:
+            row = await (await connection.execute(
+                "SELECT id,document_id,total_visuals,completed_visuals FROM document_analyses "
+                f"WHERE project_id=? AND status='running' AND total_visuals>0{doc_filter} "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (project_id, *doc_params),
+            )).fetchone()
+        return dict(row) if row else None
 
     async def visual_regions_for_document(
         self, project_id: str, document_id: str

@@ -174,14 +174,14 @@ def priority_score(
     )
 
 
-def _as_claims(value) -> list[AnalysisClaim]:
+def _as_claims(
+    value: AnalysisClaim | list[AnalysisClaim] | None,
+) -> list[AnalysisClaim]:
     if value is None:
         return []
     if isinstance(value, list):
         return value
-    if isinstance(value, AnalysisClaim):
-        return [value]
-    return []
+    return [value]
 
 
 def citation_index(report: AnalysisReport) -> dict[str, list[CitingClaim]]:
@@ -211,6 +211,31 @@ def citation_index(report: AnalysisReport) -> dict[str, list[CitingClaim]]:
                 COMPARISON_PAPER_TITLE, "comparison", field,
                 _as_claims(getattr(comparison, field, None)),
             )
+    return index
+
+
+def citation_index_papers(papers) -> dict[str, list[CitingClaim]]:
+    """evidence_id -> supported per-paper conclusions citing it (no comparison).
+
+    Used at the pre-synthesis evidence-review gate, where the final report does
+    not exist yet but the per-paper ``PaperAnalysis`` rows (and their claims) are
+    already persisted. Same claim shape as ``citation_index`` minus the
+    cross-paper comparison section.
+    """
+    index: dict[str, list[CitingClaim]] = {}
+    for paper in papers:
+        for field in (*PAPER_CLAIM_FIELDS, "overview"):
+            for claim in _as_claims(getattr(paper, field, None)):
+                if claim.kind != "supported" or not claim.evidence_ids:
+                    continue
+                ref = CitingClaim(
+                    scope="paper",  # type: ignore[arg-type]
+                    paper_title=paper.title, field=field,
+                    value=claim.value, kind=claim.kind,
+                    evidence_count=len(claim.evidence_ids),
+                )
+                for evidence_id in claim.evidence_ids:
+                    index.setdefault(evidence_id, []).append(ref)
     return index
 
 

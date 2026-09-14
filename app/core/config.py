@@ -1,5 +1,4 @@
 from functools import lru_cache
-from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -66,9 +65,7 @@ class Settings(BaseSettings):
     literature_cache_ttl_seconds: float = Field(default=900, gt=0)
 
     # 排序口径：被 LLM 精筛判为 include 的论文按语义相关分优先排序，词法分仅作为
-    # 未进入精筛名单论文的兜底。以下权重字段保留仅为旧配置兼容，不再参与计算。
-    ranking_lexical_weight: float = Field(default=0.45, ge=0, le=1)
-    ranking_llm_weight: float = Field(default=0.55, ge=0, le=1)
+    # 未进入精筛名单论文的兜底。
     ranking_llm_top_n: int = Field(default=10, ge=1, le=30)
     ranking_abstract_chars: int = Field(default=600, ge=100, le=2_000)
 
@@ -77,9 +74,7 @@ class Settings(BaseSettings):
     skill_max_bytes: int = Field(default=64_000, ge=1_000, le=1_000_000)
     workspace_root: str = "data/workspaces"
     document_max_bytes: int = Field(default=50_000_000, ge=1_000_000)
-    document_render_dpi: int = Field(default=144, ge=72, le=300)
     mcp_config_path: str = "config/mcp_servers.json"
-    mcp_allowed_roots: list[str] = Field(default_factory=lambda: [str(Path.cwd())])
 
 
 @lru_cache

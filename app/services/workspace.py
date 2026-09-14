@@ -14,7 +14,6 @@ from app.db import (
     ProjectRepository,
     ResearchDataRepository,
     ResearchSessionRepository,
-    SummaryRepository,
     TransferRepository,
     WorkflowJobRepository,
     WorkItemRepository,
@@ -26,6 +25,7 @@ from app.evidence import EvidenceVerifier
 from app.evidence.review_desk import (
     build_queue,
     citation_index,
+    citation_index_papers,
     filter_rows,
     impact_preview,
 )
@@ -34,7 +34,6 @@ from app.schemas import (
     PaperAcquisition,
     ProjectSummary,
     ProjectWorkspace,
-    ResearchProfileInput,
     ResearchRequest,
     ReviewDesk,
     ReviewDeskItem,
@@ -62,16 +61,82 @@ async def _optional(awaitable):
         return None
 
 
-def _analysis_claims(value):
-    overview = getattr(value, "overview", None)
-    if overview is not None:
-        yield overview
-    for name in (
-        "core_problem", "methods", "mechanisms", "experimental_setup", "main_results",
-        "limitations", "relevance_to_topic", "commonalities", "differences",
-        "complementarities", "applicability",
-    ):
-        yield from getattr(value, name, [])
+def _split_constraints(constraints: list[str]) -> tuple[str | None, list[str], list[str]]:
+    """Reverse the flat ``ResearchRequest.constraints`` list back into the three
+    edit-form fields it was built from (see ``_project_inputs``)."""
+    approach: str | None = None
+    difficulties: list[str] = []
+    metrics: list[str] = []
+    for item in constraints:
+        if item.startswith("Current approach: "):
+            approach = item[len("Current approach: "):]
+        elif item.startswith("Target metric: "):
+            metrics.append(item[len("Target metric: "):])
+        else:
+            difficulties.append(item)
+    return approach, difficulties, metrics
+
+
+#: Part ordering + which report fields each per-paper part owns. These mirror the
+#: specialist blocks in app.agents.paper_analysis so the incremental analysis
+#: surface can rebuild a per-part view straight from the persisted work items.
+_ANALYSIS_PART_ORDER = ("problem", "method", "experiment", "critical", "overview")
+_ANALYSIS_PART_FIELDS: dict[str, tuple[str, ...]] = {
+    "problem": ("core_problem", "relevance_to_topic"),
+    "method": ("methods", "mechanisms"),
+    "experiment": ("experimental_setup", "main_results"),
+    "critical": ("limitations",),
+    "overview": ("overview",),
+}
+_ANALYSIS_PART_LABELS: dict[str, str] = {
+    "problem": "问题与贡献",
+    "method": "方法与机制",
+    "experiment": "实验与结果",
+    "critical": "局限与相关性",
+    "overview": "综合概述",
+}
+
+
+def _walk_evidence_ids(value) -> set[str]:
+    """Collect every ``evidence_ids`` list in a (dict/list) payload tree."""
+    ids: set[str] = set()
+
+    def collect(item):
+        if isinstance(item, dict):
+            if "evidence_ids" in item:
+                ids.update(item["evidence_ids"])
+            for child in item.values():
+                collect(child)
+        elif isinstance(item, list):
+            for child in item:
+                collect(child)
+
+    collect(value)
+    return ids
+
+
+def _replace_evidence_ids(value, evidence_by_id, resource_url) -> None:
+    """In-place: swap each ``evidence_ids`` list for inline evidence objects."""
+    if isinstance(value, dict):
+        if "evidence_ids" in value:
+            value["evidence"] = [
+                {
+                    "type": evidence_by_id[identifier].evidence_type,
+                    "page": evidence_by_id[identifier].page_number,
+                    "section": evidence_by_id[identifier].section,
+                    "label": evidence_by_id[identifier].label,
+                    "claim": evidence_by_id[identifier].claim,
+                    "excerpt": evidence_by_id[identifier].excerpt,
+                    "resource_url": resource_url(identifier),
+                }
+                for identifier in value.pop("evidence_ids")
+                if identifier in evidence_by_id
+            ]
+        for child in value.values():
+            _replace_evidence_ids(child, evidence_by_id, resource_url)
+    elif isinstance(value, list):
+        for child in value:
+            _replace_evidence_ids(child, evidence_by_id, resource_url)
 
 
 @dataclass(frozen=True)
@@ -93,7 +158,6 @@ class WorkspaceService:
         self.items = WorkItemRepository(database)
         self.jobs = WorkflowJobRepository(database)
         self.evidence = EvidenceRepository(database)
-        self.summaries = SummaryRepository(database)
         self.research = ResearchDataRepository(database)
         self.sessions = ResearchSessionRepository(database)
         self.documents = DocumentRepository(database)
@@ -176,27 +240,9 @@ class WorkspaceService:
         return result
 
     async def create(self, body: WorkspaceProjectCreate) -> WorkspaceMutationResult:
-        request = ResearchRequest(
-            research_question=body.research_question,
-            year_from=body.advanced.year_from,
-            year_to=body.advanced.year_to,
-            maximum_papers=body.advanced.max_papers,
-            constraints=[
-                *([f"Current approach: {body.current_approach}"] if body.current_approach else []),
-                *body.difficulties,
-                *[f"Target metric: {metric}" for metric in body.target_metrics],
-            ],
-            literature_sources=body.advanced.sources,
-        )
-        profile = ResearchProfileInput(
-            problem_statement=body.research_question,
-            objectives=[body.research_question],
-            baseline=body.current_approach,
-            metrics=body.target_metrics,
-            pain_points=body.difficulties,
-        )
+        request = self._project_inputs(body)
         project_id, job_id = await self.research.create_workspace(
-            body.project_name or body.research_question[:120], request, profile
+            body.project_name or body.research_question[:120], request
         )
         await self.sessions.begin_search(project_id)
         job = await self.jobs.get(job_id)
@@ -211,17 +257,16 @@ class WorkspaceService:
         self, project_id: str, body: WorkspaceProjectUpdate
     ) -> WorkspaceMutationResult:
         await self.app.state.workflow_worker.cancel_project(project_id)
-        request, profile = self._project_inputs(body)
+        request = self._project_inputs(body)
         await self.projects.update_definition(project_id, body.project_name, request)
-        await self.transfers.upsert_profile(project_id, profile)
         return WorkspaceMutationResult(
             message="课题设置已保存，可前往检索文献阶段重新检索",
             workspace=await self.workspace(project_id),
         )
 
     @staticmethod
-    def _project_inputs(body: WorkspaceProjectCreate) -> tuple[ResearchRequest, ResearchProfileInput]:
-        request = ResearchRequest(
+    def _project_inputs(body: WorkspaceProjectCreate) -> ResearchRequest:
+        return ResearchRequest(
             research_question=body.research_question,
             year_from=body.advanced.year_from,
             year_to=body.advanced.year_to,
@@ -233,14 +278,6 @@ class WorkspaceService:
             ],
             literature_sources=body.advanced.sources,
         )
-        profile = ResearchProfileInput(
-            problem_statement=body.research_question,
-            objectives=[body.research_question],
-            baseline=body.current_approach,
-            metrics=body.target_metrics,
-            pain_points=body.difficulties,
-        )
-        return request, profile
 
     async def delete(self, project_id: str) -> None:
         # The worker must stop first; otherwise it could recreate project output after deletion.
@@ -254,30 +291,40 @@ class WorkspaceService:
         revision = search["revision"] if search else 0
         selection = await self.sessions.selection(project_id)
         report = await self.sessions.report(project_id, revision) if revision else None
+        # Scope the analysis metrics / "current visual" to the current selection's
+        # documents so a superseded paper's still-running pass never leaks into
+        # the page/figure counts: a reselect must read as a fresh, isolated run.
+        allowed_documents: list[str] | None = None
+        if selection:
+            allowed_documents = []
+            for paper_id in selection["paper_ids"]:
+                linked = await _optional(self.documents.get_for_paper(project_id, paper_id))
+                if linked:
+                    allowed_documents.append(linked.document_id)
         (
             project,
             job,
             metrics,
             records,
             acquisition_list,
-            research_profile,
             analysis_metrics,
             review_counts,
             usage,
             budget_win,
             hitl_events,
+            running_visual,
         ) = await asyncio.gather(
             self.projects.get(project_id),
             self.jobs.latest_for_project(project_id),
             self.items.metrics(project_id),
             self.papers.list_for_project(project_id),
             self.transfers.list_acquisitions(project_id),
-            self.transfers.get_profile(project_id),
-            self.research.analysis_metrics(project_id),
+            self.research.analysis_metrics(project_id, allowed_documents),
             self.research.review_counts(project_id),
             self.research.usage_totals(project_id),
             self.research.budget_window(project_id),
             self.hitl.open_events(project_id),
+            self.research.running_visual_analysis(project_id, allowed_documents),
         )
         user_stage, label, detail = self.stage(project, job)
         acquisitions = {value.paper_id: value for value in acquisition_list}
@@ -291,6 +338,9 @@ class WorkspaceService:
             project_id, paper_token, records, acquisitions
         ) if paper_token else None
         next_action = self._next_action(project_id, user_stage, detail, records, acquisitions)
+        current_visual = (
+            await self._current_visual(project_id, running_visual)
+        ) if running_visual else None
         high_risk_review_count = 0
         if report is not None:
             # Cheap banner count (no evidence fetch): machine-doubted evidence
@@ -333,6 +383,13 @@ class WorkspaceService:
                     "total": row["total"],
                     "updated_at": row["updated_at"],
                 })
+        analysis_papers = await self._analysis_papers(
+            project_id, revision, selection, records
+        )
+        analysis_blocks = await self._analysis_blocks(
+            project_id, revision, selection, records, board
+        )
+        approach, difficulties, metrics = _split_constraints(project.request.constraints)
         return ProjectWorkspace(
             project_id=project.id,
             name=project.name,
@@ -355,6 +412,7 @@ class WorkspaceService:
                     str(analysis_metrics["current_step"])
                     if analysis_metrics["current_step"] else None
                 ),
+                current_visual=current_visual,
             ),
             literature=literature,
             selected_paper=selected_paper,
@@ -366,6 +424,8 @@ class WorkspaceService:
             ],
             analysis_requirements=(selection or {}).get("requirements"),
             analysis_report=await self._report_payload(project_id, report) if report else None,
+            analysis_papers=analysis_papers,
+            analysis_blocks=analysis_blocks,
             evidence_review=review_counts,
             high_risk_review_count=high_risk_review_count,
             budget_hint=budget_hint,
@@ -381,9 +441,9 @@ class WorkspaceService:
             project_input={
                 "project_name": project.name,
                 "research_question": project.request.research_question,
-                "current_approach": research_profile.baseline,
-                "difficulties": research_profile.pain_points,
-                "target_metrics": research_profile.metrics,
+                "current_approach": approach,
+                "difficulties": difficulties,
+                "target_metrics": metrics,
                 "advanced": {
                     "year_from": project.request.year_from,
                     "year_to": project.request.year_to,
@@ -393,8 +453,55 @@ class WorkspaceService:
             },
         )
 
-    def _paper_card(self, project_id, revision, paper, acquisition) -> dict:
-        return {
+    async def _current_visual(self, project_id: str, running: dict) -> dict | None:
+        """Which visual is being analyzed right now.
+
+        Rebuilds the in-flight document's ordered visual list from the cached
+        parse (figures then tables), compares against the already-persisted
+        ``visual_regions`` keys, and reports the first not-yet-done visual with
+        its page + figure/table ordinal + per-kind counts. Best-effort: any
+        parse/IO issue returns None so the UI falls back to plain counts.
+        """
+        try:
+            parsed = self.document_service.get_structure(
+                project_id, running["document_id"]
+            )
+        except Exception:  # noqa: BLE001 - cosmetic; fall back to plain counts
+            return None
+        visuals = [
+            {"key": f"{v.page_number}|figure|{v.label or ''}",
+             "page": v.page_number, "kind": "figure", "label": v.label}
+            for v in parsed.figures
+        ] + [
+            {"key": f"{v.page_number}|table|{v.label or ''}",
+             "page": v.page_number, "kind": "table", "label": v.label}
+            for v in parsed.tables
+        ]
+        if not visuals:
+            return None
+        existing = await self.research.visual_keys(running["id"])
+        kind_total = {
+            "figure": sum(1 for v in visuals if v["kind"] == "figure"),
+            "table": sum(1 for v in visuals if v["kind"] == "table"),
+        }
+        done: dict[str, int] = {"figure": 0, "table": 0}
+        for index, visual in enumerate(visuals):
+            if visual["key"] in existing:
+                done[visual["kind"]] += 1
+                continue
+            return {
+                "page": visual["page"],
+                "kind": visual["kind"],
+                "label": visual["label"],
+                "index": index + 1,
+                "total": len(visuals),
+                "kind_index": done[visual["kind"]] + 1,
+                "kind_total": kind_total[visual["kind"]],
+                "kind_done": done[visual["kind"]],
+            }
+        return None
+
+    def _paper_card(self, project_id, revision, paper, acquisition) -> dict:        return {
             "paper_token": issue_token(project_id, "paper", f"{revision}:{paper.id}"),
             "title": paper.metadata.title,
             "authors": [author.name for author in paper.metadata.authors],
@@ -412,13 +519,10 @@ class WorkspaceService:
         current = await self.sessions.current_search(project_id)
         if current is None or int(revision_text) != current["revision"]:
             raise RecordNotFoundError("Paper belongs to an outdated search")
-        paper = next((value for value in records if value.id == paper_id), None)
-        if paper is None:
-            raise RecordNotFoundError("Paper not found")
-        summary, nodes = await asyncio.gather(
-            _optional(self.summaries.get(project_id, paper_id)),
-            self.evidence.list_for_paper(project_id, paper_id),
-        )
+        # The token was issued by the server against this search's own records,
+        # so revision equality (checked above) already guarantees membership.
+        paper = next(value for value in records if value.id == paper_id)
+        nodes = await self.evidence.list_for_paper(project_id, paper_id)
         acquisition = acquisitions.get(paper_id)
         regions = (
             await self.research.visual_regions_for_document(project_id, acquisition.document_id)
@@ -428,7 +532,6 @@ class WorkspaceService:
             "paper_token": paper_token,
             "title": paper.metadata.title,
             "metadata": paper.metadata.model_dump(mode="json"),
-            "summary": summary.model_dump(mode="json") if summary else None,
             "evidence": [self._evidence_card(project_id, node) for node in nodes],
             "figures": [self._visual_card(project_id, region) for region in regions
                         if region["region_type"] == "figure"],
@@ -470,49 +573,94 @@ class WorkspaceService:
                 self._resource_url(project_id, "document", linked.document_id)
                 if linked else None
             )
-        evidence_ids = {
-            identifier
-            for paper in report.papers
-            for claim in _analysis_claims(paper)
-            for identifier in claim.evidence_ids
-        }
-        if report.comparison:
-            evidence_ids.update(
-                identifier
-                for claim in _analysis_claims(report.comparison)
-                for identifier in claim.evidence_ids
-            )
+        await self._inline_payload_evidence(project_id, payload)
+        return payload
+
+    async def _inline_payload_evidence(self, project_id, payload) -> None:
+        """In-place: turn every claim's ``evidence_ids`` into inline evidence."""
+        lookup = lambda identifier: self._resource_url(
+            project_id, "evidence", identifier
+        )
+        identifiers = _walk_evidence_ids(payload)
         nodes = await asyncio.gather(*(
-            _optional(self.evidence.get(project_id, identifier)) for identifier in evidence_ids
+            _optional(self.evidence.get(project_id, identifier))
+            for identifier in identifiers
         ))
         evidence_by_id = {node.evidence_id: node for node in nodes if node is not None}
+        _replace_evidence_ids(payload, evidence_by_id, lookup)
 
-        def replace(value):
-            if isinstance(value, dict):
-                if "evidence_ids" in value:
-                    value["evidence"] = [
-                        {
-                            "type": evidence_by_id[identifier].evidence_type,
-                            "page": evidence_by_id[identifier].page_number,
-                            "section": evidence_by_id[identifier].section,
-                            "label": evidence_by_id[identifier].label,
-                            "claim": evidence_by_id[identifier].claim,
-                            "excerpt": evidence_by_id[identifier].excerpt,
-                            "resource_url": self._resource_url(
-                                project_id, "evidence", identifier
-                            ),
-                        }
-                        for identifier in value.pop("evidence_ids")
-                        if identifier in evidence_by_id
-                    ]
-                for item in value.values():
-                    replace(item)
-            elif isinstance(value, list):
-                for item in value:
-                    replace(item)
+    async def _analysis_papers(self, project_id, revision, selection, records):
+        """Selected papers + live PDF handles (available before synthesis)."""
+        if not selection:
+            return []
+        out: list[dict] = []
+        for paper_id in selection["paper_ids"]:
+            paper = next((value for value in records if value.id == paper_id), None)
+            if paper is None:
+                continue
+            linked = await _optional(self.documents.get_for_paper(project_id, paper_id))
+            out.append({
+                "paper_id": paper_id,
+                "paper_token": issue_token(project_id, "paper", f"{revision}:{paper_id}"),
+                "title": paper.metadata.title,
+                "pdf_url": (
+                    self._resource_url(project_id, "document", linked.document_id)
+                    if linked else None
+                ),
+            })
+        return out
 
-        replace(payload)
-        return payload
+    async def _analysis_blocks(self, project_id, revision, selection, records, board):
+        """Per-(paper, part) analysis blocks for incremental rendering.
+
+        Builds the part content from the persisted ``paper_analysis_section``
+        work items (so it is visible as soon as a section completes) and marks
+        each part's state from ``analysis_progress`` (queued / running /
+        completed). This lets the UI stream content while the analysis runs.
+        """
+        if not selection:
+            return []
+        titles = {value.id: value.metadata.title for value in records}
+        status_by_paper: dict[str, dict[str, str]] = {}
+        for row in board:
+            status_by_paper.setdefault(row["paper_id"], {})[row["stage_key"]] = row["status"]
+        blocks: list[dict] = []
+        part_instructions = await self.sessions.part_instructions(project_id, revision)
+        for paper_id in selection["paper_ids"]:
+            paper_status = status_by_paper.get(paper_id, {})
+            sections = await self.items.analysis_sections(project_id, revision, paper_id)
+            for part in _ANALYSIS_PART_ORDER:
+                content = None
+                if part in sections:
+                    draft = sections[part]
+                    content = {
+                        field: draft.get(field)
+                        for field in _ANALYSIS_PART_FIELDS[part]
+                        if draft.get(field)
+                    }
+                    if content:
+                        await self._inline_payload_evidence(project_id, content)
+                # Status is content-derived first (a section's result is
+                # authoritative even for projects analysed before the
+                # analysis_progress table existed); otherwise fall back to the
+                # live progress board, then to "queued".
+                if content:
+                    status = "completed"
+                else:
+                    status = paper_status.get(part, "queued")
+                blocks.append({
+                    "paper_id": paper_id,
+                    "paper_token": issue_token(
+                        project_id, "paper", f"{revision}:{paper_id}"
+                    ),
+                    "paper_title": titles.get(paper_id, "论文"),
+                    "part_key": part,
+                    "part_label": _ANALYSIS_PART_LABELS[part],
+                    "status": status,
+                    "content": content,
+                    "note": part_instructions.get(paper_id, {}).get(part),
+                })
+        return blocks
 
     @staticmethod
     def _resource_url(project_id: str, kind: str, identifier: str) -> str:
@@ -567,36 +715,9 @@ class WorkspaceService:
             job = await self.jobs.enqueue(project_id, "research")
             self.app.state.workflow_worker.wake()
             message = "已根据补充要求重新提交检索"
-        elif action.type == "reselect_papers":
-            current = await self.sessions.current_search(project_id)
-            if current is None or current["status"] != "completed":
-                raise ProjectConflictError("No completed search is available for paper selection")
-            await self.app.state.workflow_worker.cancel_project(project_id)
-            await self.sessions.reset_selection(project_id)
-            await self.projects.set_analysis_review_decision(project_id, None)
-            # Any earlier wait becomes obsolete; then re-open a fresh one.
-            await self.hitl.resolve_all(
-                project_id, status="superseded",
-                resolved_by="action:reselect_papers",
-                resolution={"action": "reselect_papers"},
-            )
-            # Back to the selection wait: same derived waiting_for_human state
-            # (status='waiting' + one open paper_selection event).
-            await self.projects.wait_for_human(
-                project_id, "paper_selection",
-                event_type="paper_selection",
-                title="请选择要精读的论文",
-                reason="已回到选文阶段；确认前不会下载全文、不会触发分析。",
-                options=[
-                    {"action": "select_papers", "label": "选择 1-2 篇并开始精读"},
-                    {"action": "regenerate_search", "label": "补充要求重新检索"},
-                ],
-                created_by="human",
-            )
-            message = "已返回论文选择阶段"
         elif action.type == "select_papers":
             current = await self.sessions.current_search(project_id)
-            if current is None or current["status"] != "completed":
+            if current is None or current["plan"] is None:
                 raise ProjectConflictError("Search has not completed")
             decoded = [
                 read_token(token, project_id, "paper")["i"] for token in action.paper_tokens
@@ -613,6 +734,13 @@ class WorkspaceService:
                 [paper_id for _, paper_id in revisions_and_ids],
                 action.analysis_requirements.strip() if action.analysis_requirements else None,
             )
+            # A re-selection after a paused / completed run must not inherit the
+            # previous selection's per-paper analyses, report or cached section
+            # work items: the new paper set is a fresh, isolated analysis run and
+            # the UI must render only it (no leftover report/board/counters from
+            # the earlier papers). Documents / figures / evidence stay (they are
+            # per-paper artifacts reused via cache).
+            await self.sessions.reset_analysis(project_id, current["revision"])
             # The human decision consumes the open paper_selection event; only
             # then may the analysis job run (worker guard checks open events).
             await self.hitl.resolve_all(
@@ -704,7 +832,7 @@ class WorkspaceService:
         elif action.type == "reanalyze_part":
             current = await self.sessions.current_search(project_id)
             selection = await self.sessions.selection(project_id)
-            if current is None or current["status"] != "completed" or selection is None:
+            if current is None or current["plan"] is None or selection is None:
                 raise ProjectConflictError("需要一次已完成的分析才能局部重析")
             revision = current["revision"]
             revision_text, paper_id = read_token(
@@ -745,14 +873,24 @@ class WorkspaceService:
             job=job,
         )
 
-    async def _current_report(self, project_id: str):
+    async def _desk_scope(self, project_id: str):
+        """Citation index + paper ids for the decision desk.
+
+        Prefers the synthesis report; falls back to the persisted per-paper
+        analyses at the pre-synthesis review gate, so the human can adjudicate
+        the disputed evidence *before* paying for the final synthesis call.
+        """
         search = await self.sessions.current_search(project_id)
         if search is None:
             raise RecordNotFoundError("该项目还没有检索记录")
-        report = await self.sessions.report(project_id, search["revision"])
-        if report is None:
-            raise ProjectConflictError("分析报告尚未生成，暂无可复核证据")
-        return report
+        revision = search["revision"]
+        report = await self.sessions.report(project_id, revision)
+        if report is not None:
+            return citation_index(report), [paper.paper_id for paper in report.papers]
+        analyses = await self.sessions.paper_analyses(project_id, revision)
+        if not analyses:
+            raise ProjectConflictError("分析报告尚未生成，且没有已完成的逐篇分析，暂无证据可复核")
+        return citation_index_papers(analyses), [analysis.paper_id for analysis in analyses]
 
     @staticmethod
     def _claim_refs(claims) -> list[DeskClaimRef]:
@@ -790,12 +928,11 @@ class WorkspaceService:
         )
 
     async def review_desk(self, project_id: str, segment: str = "priority") -> ReviewDesk:
-        report = await self._current_report(project_id)
-        index = citation_index(report)
+        index, paper_ids = await self._desk_scope(project_id)
         nodes: list = []
-        for paper in report.papers:
+        for paper_id in paper_ids:
             nodes.extend(await self.evidence.list_for_paper(
-                project_id, paper.paper_id, limit=2_000
+                project_id, paper_id, limit=2_000
             ))
         result = build_queue(nodes, await self.research.list_reviews(project_id), index)
         items = [
@@ -813,8 +950,8 @@ class WorkspaceService:
         self, project_id: str, body: ReviewPreviewRequest
     ) -> ReviewPreviewResult:
         evidence_id = read_token(body.evidence_token, project_id, "evidence")["i"]
-        report = await self._current_report(project_id)
-        impact = impact_preview(citation_index(report), evidence_id)
+        index, _ = await self._desk_scope(project_id)
+        impact = impact_preview(index, evidence_id)
         if body.status == "excluded":
             message = (
                 f"这条证据被 {impact.cited_total} 条结论引用；排除后 "
@@ -851,19 +988,27 @@ class WorkspaceService:
                      budget_win: dict[str, Any] | None = None) -> dict[str, Any] | None:
         """Display-level budget line + M3 cost-gate summary.
 
-        Fields keep the advisory visual/minute hints (``warning_*``/``warned``)
-        and add the metered ledger totals (``tokens_total`` / ``vision_calls_total``)
-        plus the gate thresholds (``gate_*``) so the UI can show the live usage
-        and explain a ``budget_gate`` pause.
+        Fields keep the advisory visual/minute hints (``warning_*``/``warned``).
+        ``tokens_total`` / ``vision_calls_total`` are reported *per run window*
+        (usage since the last re-baseline on continue / re-select / re-analyze),
+        not cumulative project spend, so a freshly re-selected paper shows a
+        congruent "started ~0 minutes ago, spent ~0 tokens" line instead of the
+        previous paper's leftover counters. The gate thresholds (``gate_*``)
+        explain a ``budget_gate`` pause.
         """
         settings = get_settings()
+        usage = usage or {}
+        budget_win = budget_win or {}
+        # A window starts either at the human "continue"/re-select (since) or at
+        # the job's creation; either way elapsed reflects the current run, not
+        # the whole project.
+        start = budget_win.get("since") or (job.created_at if job else None)
         try:
-            created = job.created_at if job is not None else None
-            if created is not None:
-                if created.tzinfo is None:
-                    created = created.replace(tzinfo=UTC)
+            if start is not None:
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=UTC)
                 elapsed_minutes = max(
-                    0, int((datetime.now(UTC) - created).total_seconds() // 60)
+                    0, int((datetime.now(UTC) - start).total_seconds() // 60)
                 )
             else:
                 elapsed_minutes = 0
@@ -875,8 +1020,8 @@ class WorkspaceService:
             total >= settings.budget_warning_vision_calls
             or elapsed_minutes >= settings.budget_warning_minutes
         )
-        usage = usage or {}
-        budget_win = budget_win or {}
+        baseline_tokens = int(budget_win.get("baseline_tokens") or 0)
+        baseline_vision = int(budget_win.get("baseline_vision") or 0)
         return {
             "elapsed_minutes": elapsed_minutes,
             "total_visuals": total,
@@ -885,8 +1030,10 @@ class WorkspaceService:
             "warning_vision_calls": settings.budget_warning_vision_calls,
             "warning_minutes": settings.budget_warning_minutes,
             "warned": warned,
-            "tokens_total": int(usage.get("tokens") or 0),
-            "vision_calls_total": int(usage.get("vision_calls") or 0),
+            "tokens_total": max(0, int(usage.get("tokens") or 0) - baseline_tokens),
+            "vision_calls_total": max(
+                0, int(usage.get("vision_calls") or 0) - baseline_vision
+            ),
             "gate_enabled": settings.budget_gate_enabled,
             "gate_open": bool(budget_win.get("open")),
             "gate_tokens": settings.budget_gate_tokens,

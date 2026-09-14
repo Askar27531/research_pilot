@@ -54,14 +54,10 @@ def make_search_papers_node(literature: LiteratureToolClient) -> SearchNode:
         per_query_limit = min(30, max(request.maximum_papers * 2, 10))
         for query in queries:
             try:
-                try:
-                    result = await literature.search_papers(
-                        query.query, request.year_from, request.year_to, per_query_limit,
-                        sources=request.literature_sources,
-                    )
-                except TypeError:
-                    result = await literature.search_papers(
-                        query.query, request.year_from, request.year_to, per_query_limit)
+                result = await literature.search_papers(
+                    query.query, request.year_from, request.year_to, per_query_limit,
+                    sources=request.literature_sources,
+                )
                 papers.extend(result.papers)
                 warnings.extend(result.warnings)
                 successes += 1

@@ -1,9 +1,5 @@
 from app.db.database import Database
-from app.db.evidence_repositories import (
-    DocumentRepository,
-    EvidenceRepository,
-    SummaryRepository,
-)
+from app.db.evidence_repositories import DocumentRepository, EvidenceRepository
 from app.db.progress_repository import WorkItemRepository
 from app.db.repositories import (
     HitlEventRepository,
@@ -25,7 +21,6 @@ __all__ = [
     "ProjectRepository",
     "ResearchDataRepository",
     "ResearchSessionRepository",
-    "SummaryRepository",
     "TraceRepository",
     "TransferRepository",
     "WorkItemRepository",

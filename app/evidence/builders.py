@@ -34,8 +34,6 @@ class EvidenceBuilder:
         ):
             raise DocumentNotFoundError("Page screenshot is unavailable for source verification")
         start = page.text.find(request.quote)
-        if start < 0:
-            raise DocumentNotFoundError("Quoted text does not exist on the requested page")
         end = start + len(request.quote)
         section = self._section_for_page(
             self.documents.get_structure(project_id, request.document_id), request.page_number
@@ -65,10 +63,8 @@ class EvidenceBuilder:
         await self._validate_link(project_id, request.paper_id, request.document_id)
         parsed = self.documents.get_structure(project_id, request.document_id)
         figure = next(
-            (item for item in parsed.figures if item.figure_id == request.figure_id), None
+            item for item in parsed.figures if item.figure_id == request.figure_id
         )
-        if figure is None:
-            raise DocumentNotFoundError(f"Unknown figure: {request.figure_id}")
         if not self.documents.workspace.resolve_safe_path(project_id, figure.source_path).is_file():
             raise DocumentNotFoundError("Figure artifact is missing")
         node = EvidenceNode(
@@ -94,9 +90,9 @@ class EvidenceBuilder:
     async def build_table(self, project_id: str, request: TableEvidenceCreate) -> EvidenceNode:
         await self._validate_link(project_id, request.paper_id, request.document_id)
         parsed = self.documents.get_structure(project_id, request.document_id)
-        table = next((item for item in parsed.tables if item.table_id == request.table_id), None)
-        if table is None:
-            raise DocumentNotFoundError(f"Unknown table: {request.table_id}")
+        table = next(
+            item for item in parsed.tables if item.table_id == request.table_id
+        )
         page = self.documents.get_page(project_id, request.document_id, table.page_number)
         caption = table.caption or table.label or table.table_id
         source_hash = hashlib.sha256(caption.encode("utf-8")).hexdigest()

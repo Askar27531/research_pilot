@@ -18,8 +18,8 @@ class ResearchSessionRepository:
             )).fetchone()
             revision = row["revision"]
             await connection.execute(
-                "INSERT INTO search_sessions(project_id,revision,instruction,status,created_at,updated_at) "
-                "VALUES(?,?,?,'queued',?,?)", (project_id, revision, instruction, now, now),
+                "INSERT INTO search_sessions(project_id,revision,instruction,created_at,updated_at) "
+                "VALUES(?,?,?,?,?)", (project_id, revision, instruction, now, now),
             )
             await connection.execute("UPDATE papers SET selected=0 WHERE project_id=?", (project_id,))
             await connection.execute("DELETE FROM paper_selections WHERE project_id=?", (project_id,))
@@ -27,7 +27,6 @@ class ResearchSessionRepository:
             await connection.execute(
                 "DELETE FROM selected_paper_analyses WHERE project_id=?", (project_id,)
             )
-            await connection.execute("DELETE FROM paper_summaries WHERE project_id=?", (project_id,))
             await connection.execute("DELETE FROM paper_acquisitions WHERE project_id=?", (project_id,))
             await connection.execute("DELETE FROM documents WHERE project_id=?", (project_id,))
             await connection.commit()
@@ -36,7 +35,7 @@ class ResearchSessionRepository:
     async def pending_search(self, project_id: str) -> dict:
         async with self.database.connect() as connection:
             row = await (await connection.execute(
-                "SELECT * FROM search_sessions WHERE project_id=? AND status='queued' "
+                "SELECT * FROM search_sessions WHERE project_id=? AND plan_json IS NULL "
                 "ORDER BY revision DESC LIMIT 1", (project_id,),
             )).fetchone()
         if row is None:
@@ -50,8 +49,8 @@ class ResearchSessionRepository:
         async with self.database.connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             cursor = await connection.execute(
-                "UPDATE search_sessions SET status='completed',plan_json=?,updated_at=? "
-                "WHERE project_id=? AND revision=? AND status='queued'",
+                "UPDATE search_sessions SET plan_json=?,updated_at=? "
+                "WHERE project_id=? AND revision=? AND plan_json IS NULL",
                 (dump_json(plan), now, project_id, revision),
             )
             if cursor.rowcount != 1:
@@ -89,10 +88,10 @@ class ResearchSessionRepository:
         async with self.database.connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             latest = await (await connection.execute(
-                "SELECT revision,status FROM search_sessions WHERE project_id=? "
+                "SELECT revision,plan_json FROM search_sessions WHERE project_id=? "
                 "ORDER BY revision DESC LIMIT 1", (project_id,),
             )).fetchone()
-            if latest is None or latest["revision"] != revision or latest["status"] != "completed":
+            if latest is None or latest["revision"] != revision or latest["plan_json"] is None:
                 raise ProjectConflictError("Paper token belongs to an outdated search")
             placeholders = ",".join("?" for _ in paper_ids)
             rows = await (await connection.execute(
@@ -128,10 +127,10 @@ class ResearchSessionRepository:
         async with self.database.connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             current = await (await connection.execute(
-                "SELECT status FROM search_sessions WHERE project_id=? "
+                "SELECT plan_json FROM search_sessions WHERE project_id=? "
                 "ORDER BY revision DESC LIMIT 1", (project_id,),
             )).fetchone()
-            if current is None or current["status"] != "completed":
+            if current is None or current["plan_json"] is None:
                 await connection.rollback()
                 raise ProjectConflictError("No completed search is available for paper selection")
             await connection.execute("UPDATE papers SET selected=0 WHERE project_id=?", (project_id,))

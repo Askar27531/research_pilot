@@ -228,6 +228,7 @@ class PaperAnalyst:
         self.traces = traces
         self.settings = settings or get_settings()
 
+    # Durable-Execution: 单篇精读入口：构造 run_scope=paper-analysis:{revision}:{paper}:{指纹}，指纹含 PDF sha/课题/要求——任何输入变化都会生成新缓存键，天然不会用旧结果顶新输入。
     async def run(
         self,
         project_id: str,
@@ -521,6 +522,7 @@ class PaperAnalyst:
         self._sanitize_evidence(result, allowed)
         return result
 
+    # Durable-Execution: 精读 LLM 调用的幂等封装：messages+模型名+输出预算哈希为指纹 → claim(replace_changed=True)；命中缓存直接反序列化返回（模型不调），失败 fail 落库、下次重试 attempts+1。
     async def _checkpointed_call(
         self,
         project_id: str,

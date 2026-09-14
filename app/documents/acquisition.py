@@ -64,14 +64,14 @@ class OpenAccessDownloader:
                 pending.append(candidate)
             except _LandingPageError as exc:
                 errors.append(f"{candidate}: 返回的是文章落地页而非 PDF 直链")
-                variant = _pdf_variant_url(candidate, exc)
+                variant = _pdf_variant_url(exc)
                 if variant is None or variant == candidate:
                     break
                 pending.insert(0, variant)
             except DocumentValidationError as exc:
                 errors.append(f"{candidate}: {exc}")
                 break
-        message = "；".join(errors) or "Open access download failed"
+        message = "；".join(errors)
         raise DocumentValidationError(message[:2_000])
 
     async def _download_pdf(self, source_url: str) -> tuple[bytes, str]:
@@ -155,7 +155,7 @@ async def _read_html_body(response: httpx.Response, cap: int = 1_000_000) -> str
     return b"".join(chunks).decode("utf-8", errors="ignore")
 
 
-def _pdf_variant_url(page_url: str, error: _LandingPageError) -> str | None:
+def _pdf_variant_url(error: _LandingPageError) -> str | None:
     """Derive a probable direct PDF URL from a landing page, if any.
 
     Prefers explicit citation/meta-refresh links embedded in the page; for

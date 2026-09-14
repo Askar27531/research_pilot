@@ -27,14 +27,6 @@ class ResearchState(TypedDict):
     ranked_papers: list[dict[str, Any]]
     warnings: list[str]
 
-    evidence_ids: list[str]
-    figure_ids: list[str]
-    table_ids: list[str]
-
-    hypotheses: list[dict[str, Any]]
-    experiment_plan: dict[str, Any] | None
-
-    pending_approval: dict[str, Any] | None
     errors: list[ResearchError]
 
 
@@ -56,11 +48,5 @@ def create_research_state(
         selected_papers=[],
         ranked_papers=[],
         warnings=[],
-        evidence_ids=[],
-        figure_ids=[],
-        table_ids=[],
-        hypotheses=[],
-        experiment_plan=None,
-        pending_approval=None,
         errors=[],
     )

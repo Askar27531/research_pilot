@@ -48,39 +48,6 @@ class WorkspaceManager:
         self._ensure_within(resolved, project_root)
         return resolved
 
-    def import_pdf(self, project_id: str, source: str | Path) -> DocumentEntry:
-        source_path = Path(source).resolve()
-        if not source_path.is_file():
-            raise DocumentNotFoundError(f"PDF not found: {source_path.name}")
-        size = source_path.stat().st_size
-        if size <= 0 or size > self.max_document_bytes:
-            raise DocumentValidationError("PDF size is outside the configured limit")
-        if source_path.suffix.casefold() != ".pdf":
-            raise DocumentValidationError("Only .pdf documents are supported")
-        with source_path.open("rb") as stream:
-            if stream.read(5) != b"%PDF-":
-                raise DocumentValidationError("File content is not a PDF")
-        digest = self._sha256(source_path)
-        manifest = self.load_manifest(project_id)
-        for entry in manifest.documents:
-            if entry.sha256 == digest:
-                return entry
-        document_id = str(uuid4())
-        relative_path = f"papers/{document_id}.pdf"
-        destination = self.resolve_safe_path(project_id, relative_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, destination)
-        entry = DocumentEntry(
-            document_id=document_id,
-            sha256=digest,
-            relative_path=relative_path,
-            original_name=source_path.name,
-            size_bytes=size,
-        )
-        manifest.documents.append(entry)
-        self.save_manifest(manifest)
-        return entry
-
     def import_pdf_bytes(self, project_id: str, filename: str, content: bytes) -> DocumentEntry:
         safe_name = Path(filename).name
         if not safe_name or Path(safe_name).suffix.casefold() != ".pdf":
@@ -137,14 +104,6 @@ class WorkspaceManager:
         temporary = path.with_suffix(f".{uuid4().hex}.tmp")
         temporary.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
         os.replace(temporary, path)
-
-    @staticmethod
-    def _sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
 
     @staticmethod
     def _ensure_within(path: Path, root: Path) -> None:

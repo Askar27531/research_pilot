@@ -309,10 +309,7 @@ def _ollama_compatible_schema(schema: dict[str, Any]) -> dict[str, Any]:
             return [clean(item) for item in value]
         return value
 
-    result = clean(schema)
-    if not isinstance(result, dict):
-        raise LLMError("Could not create an Ollama-compatible JSON schema")
-    return result
+    return clean(schema)
 
 
 def _structured_response_candidates(data: dict[str, Any]) -> list[str]:

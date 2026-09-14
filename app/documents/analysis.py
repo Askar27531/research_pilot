@@ -173,7 +173,7 @@ class DocumentAnalysisPipeline:
                     table_id=visual.table_id, claim=observation.summary,
                     confidence=observation.confidence,
                 ))
-            if consistency_checker is not None and evidence_node is not None:
+            if consistency_checker is not None:
                 await consistency_checker.check_evidence(
                     project_id, parsed, evidence_node
                 )
@@ -224,9 +224,6 @@ class DocumentAnalysisPipeline:
                         if first_error is None:
                             first_error = exc
             if first_error is not None:
-                cancel_tasks()
-                if tasks:
-                    await asyncio.wait(tasks)
                 await self.research.set_progress(
                     project_id, paper_id, "visuals", "failed",
                     label="图表视觉观察与一致性检查", done=done_count,
@@ -238,9 +235,8 @@ class DocumentAnalysisPipeline:
                 )
                 raise first_error
             if paused:
-                raise pause_exc or AnalysisPausedError(
-                    self._pause_message("user"), reason="user"
-                )
+                assert pause_exc is not None
+                raise pause_exc
             await self.research.set_progress(
                 project_id, paper_id, "visuals", "completed",
                 label="图表视觉观察与一致性检查", done=len(visuals),

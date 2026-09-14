@@ -100,68 +100,6 @@ class CrossModalConsistencyReport(BaseModel):
     checks: list[ProseConsistencyCheck] = Field(min_length=1, max_length=12)
 
 
-class ClaimValue(BaseModel):
-    value: str = Field(min_length=1, max_length=4_000)
-    kind: Literal["supported", "inference", "suggestion"] = "supported"
-    evidence_ids: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def require_support(self) -> "ClaimValue":
-        if self.kind == "supported" and not self.evidence_ids:
-            raise ValueError("Supported claims require at least one evidence_id")
-        if self.kind != "supported" and self.evidence_ids:
-            raise ValueError("Inference and suggestion values cannot cite evidence as fact")
-        return self
-
-
-class PaperSummary(BaseModel):
-    summary_id: str
-    schema_version: int = 1
-    project_id: str
-    paper_id: str
-    method: list[ClaimValue] = Field(default_factory=list)
-    datasets: list[ClaimValue] = Field(default_factory=list)
-    metrics: list[ClaimValue] = Field(default_factory=list)
-    contributions: list[ClaimValue] = Field(default_factory=list)
-    limitations: list[ClaimValue] = Field(default_factory=list)
-    created_at: str
-
-
-class CompactedContext(BaseModel):
-    project_id: str
-    paper_id: str
-    summary: PaperSummary
-    evidence_index: list[EvidenceNode]
-    source_characters: int = Field(ge=0)
-    compacted_characters: int = Field(ge=0)
-    reduction_ratio: float = Field(ge=0, le=1)
-
-
-class ComparisonCell(BaseModel):
-    value: str | None = None
-    kind: Literal["supported", "inference", "suggestion", "missing"] = "missing"
-    evidence_ids: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def validate_support(self) -> "ComparisonCell":
-        if self.kind == "supported" and (not self.value or not self.evidence_ids):
-            raise ValueError("Supported comparison cells require a value and evidence")
-        if self.kind == "missing" and (self.value is not None or self.evidence_ids):
-            raise ValueError("Missing comparison cells cannot contain a value or evidence")
-        return self
-
-
-class ComparisonRow(BaseModel):
-    paper_id: str
-    cells: dict[str, ComparisonCell]
-
-
-class CrossPaperComparison(BaseModel):
-    project_id: str
-    columns: list[str]
-    rows: list[ComparisonRow]
-
-
 class TextEvidenceCreate(BaseModel):
     paper_id: str
     document_id: str

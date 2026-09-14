@@ -17,6 +17,7 @@ from app.literature import LiteratureToolClient
 from app.llm import LLMProvider
 
 
+# Durable-Execution: 组装 8 节点检索流水线（理解→查询→检索→去重→过滤→补摘要→排序→选 top）；compile(checkpointer) 后每完成一个节点就落一份图状态快照。
 def build_literature_search_graph(
     provider: LLMProvider,
     literature: LiteratureToolClient,

@@ -11,8 +11,6 @@ class EvidenceVerifier:
     def verify(self, node: EvidenceNode) -> EvidenceSourcePreview:
         if node.evidence_type == "text":
             page = self.documents.get_page(node.project_id, node.document_id, node.page_number)
-            if node.span_start is None or node.span_end is None or node.excerpt is None:
-                raise DocumentValidationError("Text evidence locator is incomplete")
             current = page.text[node.span_start : node.span_end]
             digest = hashlib.sha256(current.encode("utf-8")).hexdigest()
             if current != node.excerpt or digest != node.source_hash:

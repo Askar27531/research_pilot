@@ -60,23 +60,21 @@ class MCPGatewayConfig(BaseModel):
 
 
 class MCPServerStatus(BaseModel):
+    """Runtime health of one configured server.
+
+    Static identity (id/source/transport/enabled) lives on ``MCPServerConfig``;
+    this card only tracks what discovery/invocation observed at runtime.
+    """
+
     id: str
-    source: str
-    transport: TransportKind
-    enabled: bool
     healthy: bool = False
     discovered_tools: list[str] = Field(default_factory=list)
     last_error: str | None = None
     checked_at: str | None = None
 
     @classmethod
-    def pending(cls, config: MCPServerConfig) -> "MCPServerStatus":
-        return cls(
-            id=config.id,
-            source=config.source,
-            transport=config.transport,
-            enabled=config.enabled,
-        )
+    def pending(cls, server_id: str) -> "MCPServerStatus":
+        return cls(id=server_id)
 
     def checked(self) -> "MCPServerStatus":
         return self.model_copy(update={"checked_at": datetime.now(UTC).isoformat()})

@@ -2,7 +2,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-AgentName = Literal["coordinator", "literature_researcher"]
 TaskType = Literal["literature_search"]
 
 
@@ -14,20 +13,11 @@ class AgentTask(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
-class Handoff(BaseModel):
-    task_id: str
-    project_id: str
-    source_agent: AgentName
-    target_agent: AgentName
-    objective: str
-    context_summary: dict[str, Any] = Field(default_factory=dict)
-
-
 class AgentResult(BaseModel):
     task_id: str
     project_id: str
-    agent: AgentName
-    status: Literal["completed", "unsupported", "failed"]
+    agent: str
+    status: Literal["completed", "failed"]
     summary: str
     output: dict[str, Any] = Field(default_factory=dict)
     loaded_skills: list[str] = Field(default_factory=list)

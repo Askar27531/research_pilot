@@ -8,7 +8,3 @@ class RecordNotFoundError(RepositoryError):
 
 class ProjectConflictError(RepositoryError):
     pass
-
-
-class EvidenceReferencedError(RepositoryError):
-    pass

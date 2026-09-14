@@ -38,6 +38,7 @@ def _after_review_gate(state: AnalysisState) -> str:
     return "analyze_papers" if state.get("review_outcome") == "regenerated" else "synthesize"
 
 
+# Durable-Execution: 组装分析图（选文门→获取→逐篇精读→复核门→合成，带 regenerate 回到精读的边）；与检索图共享同一 checkpointer，thread 前缀 {project}:analysis。
 def build_analysis_graph(ctx: AnalysisGraphContext, checkpointer: Any | None = None) -> Any:
     """Compile the analysis graph with the given per-run context."""
     builder = StateGraph(AnalysisState)

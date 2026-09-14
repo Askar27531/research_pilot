@@ -82,7 +82,7 @@ def _review_targets(
     for claim_value, evidence_ids in claims:
         for evidence_id in evidence_ids:
             node = evidence_by_id.get(evidence_id)
-            if node is None or node.evidence_type == "text":
+            if node is None:
                 continue
             targets.setdefault(evidence_id, claim_value)
     return targets
@@ -152,7 +152,7 @@ class VisualEvidenceVerifier:
         """
         summary = {"confirmed": 0, "doubted": 0, "excluded": 0, "failed": 0}
         targets = _review_targets(claims, evidence_by_id)
-        if not targets or not hasattr(self.provider, "structured_output_with_images"):
+        if not targets:
             return summary
         already = await self.research.reviewed_evidence_ids(
             project_id, list(targets)

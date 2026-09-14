@@ -1,50 +1,94 @@
-# ResearchPilot Architecture
+# 架构说明
 
-```mermaid
-flowchart LR
-  UI[Streamlit 四阶段工作台] --> API[FastAPI 核心接口]
-  API --> WSVC[WorkspaceService]
-  WSVC --> WORKER[SQLite 持久化后台 Worker]
-  WORKER --> RSVC[ResearchWorkflowService]
-  RSVC --> GRAPH[LangGraph ResearchCoordinator]
-  GRAPH --> LIT[LiteratureResearcher]
-  GRAPH --> SELECT[用户选择 1–2 篇]
-  SELECT --> ANALYST[PaperAnalyst]
-  ANALYST --> SYNTH[EvidenceSynthesizer]
-  LIT --> MCP[MCP Capability Gateway]
-  MCP --> OA[OpenAlex]
-  MCP --> CR[Crossref]
-  MCP --> AX[arXiv]
-  ANALYST --> PDF[PyMuPDF / OCR]
-  ANALYST --> VLM[Ollama Vision]
-  SYNTH --> OUTPUT[逐篇分析 / 证据引用 / 双篇比较]
-  WORKER --> DB[(SQLite + Checkpoint)]
-  PDF --> WS[项目 PDF 与裁剪工作区]
-  DB --> API
-  WS --> API
+ResearchPilot 是一个本地优先、证据可追溯的多模态论文研究助手，由两个进程组成：
+
+- **API 服务**：FastAPI + LangGraph + SQLite，承载检索、分析、后台任务与证据复核。
+- **工作台**：Streamlit，面向用户的四步界面，只通过 REST API 与后端交互。
+
+REST 接口清单见 [`README.md`](../README.md)。本文描述后端架构。
+
+## 进程与数据流
+
+```
+Streamlit (ui/app.py)
+   │  REST (HTTP :8000)
+   ▼
+FastAPI (app/main.py)
+   ├─ /health、/mcp/status 路由
+   ├─ 工作台路由 (app/api/routes/core.py)
+   ├─ WorkspaceService (app/services/workspace.py)   ← 读写项目/工作台读模型
+   └─ WorkflowWorker (app/workflow_worker.py)        ← 单机持久化任务队列
+          │
+          ▼
+   ResearchWorkflowService (app/services/workflow.py)
+          │
+          ├─ Graph ① 检索图 (app/graph/workflow.py)       8 节点
+          └─ Graph ② 分析图 (app/graph/analysis_graph.py) 5 节点
+                 │
+                 ├─ MCP 能力网关 (app/mcp)
+                 ├─ 文献源 OpenAlex / Crossref / arXiv
+                 ├─ 文档子系统 (app/documents)
+                 ├─ Ollama 文本/视觉模型 (app/llm)
+                 └─ 技能注册表 (app/skills → skills/)
 ```
 
-## HTTP 边界
+## 启动装配（lifespan）
 
-Streamlit 只依赖以下 7 种路径（9 个操作）：`/health`、`/projects`（GET/POST）、`/projects/{id}`（PATCH/DELETE）、`/projects/{id}/workspace`、`/projects/{id}/actions`、`/projects/{id}/documents` 和 `/projects/{id}/resources/{token}`。API 另暴露 `GET /mcp/status` 作为第 8 种路径（第 10 个操作），供 MCP 能力注册与健康诊断，工作台不使用。
+`app/main.py` 的 lifespan 按顺序装配依赖，停机按逆序收尾：
 
-统一 workspace 是轻量读模型；传入不透明论文令牌时才附加论文摘要、Figure Cards、Structured Tables 与轻量证据。项目状态的推进统一进入 actions 接口（课题资料编辑除外，走 `PATCH /projects/{id}`，仅保存输入、取消当前任务）。PDF、证据和裁剪都使用项目绑定令牌，浏览器不拼接内部 ID。
+1. 业务库：建库 + 幂等迁移（schema 1..18，重启自动补缺）。
+2. LangGraph 档位：同一 SQLite 文件建 checkpoints/writes + WAL（重启续跑的地基）。
+3. 技能注册表：启动只建元数据索引，正文按需加载。
+4. 文档子系统：工作区 + 解析器 + 门面一次组装（应用与 MCP 文档能力共享同一实例）。
+5. MCP 能力网关：注册 server + 启动体检（文献/文档 inprocess + 外部 arXiv）。
+6. 后台 worker：恢复中断任务并开始领取循环。
 
-## 内部职责
+## 模块地图
 
-- `Coordinator` 管理检索、人工选文、全文获取、分析和恢复边界。
-- `LiteratureResearcher` 生成查询，合并三个来源，规范化、去重并排序，然后等待用户选择。
-- `PaperAnalyst` 对每篇所选论文依次提取正文、OCR、图表区域、视觉观察和证据化结论。
-- `EvidenceSynthesizer` 只消费一至两篇论文的精简分析和 Evidence，形成综合比较。
+| 目录 | 职责 |
+|---|---|
+| `app/api` | FastAPI 路由、依赖注入、异常处理、上传令牌 |
+| `app/core` | 配置（pydantic-settings）、日志 |
+| `app/db` | 仓储层：项目、论文、证据、会话、任务、追踪等 |
+| `app/literature` | 文献源适配、检索词生成、去重、过滤、排序 |
+| `app/documents` | PDF 获取、解析（PyMuPDF）、工作区管理 |
+| `app/evidence` | 证据构建、一致性校验、复核台、视觉复核 |
+| `app/llm` | Ollama 文本/视觉调用、结构化输出重试 |
+| `app/mcp` | MCP 能力注册表与路由（文献/文档/外部 arXiv） |
+| `app/graph` | 两个 LangGraph 流水线 |
+| `app/services` | WorkspaceService / ResearchWorkflowService |
+| `app/skills` | 技能绑定与注册表 |
+| `app/schemas` | Pydantic 模型 |
+| `app/agents` | 检索/分析 Agent 封装 |
+| `app/reliability` | 故障与暂停异常定义 |
+| `mcp_servers` | 可独立部署的 MCP Server（stdio/HTTP） |
+| `ui` | Streamlit 工作台 |
+| `skills` | 技能定义（SKILL.md） |
+| `evals` | 一致性/解析/检索评估数据与脚本 |
 
-Repository 和 Service 保持细粒度，不因 REST 收敛而合并。长任务由 `workflow_jobs` 持久化；一个项目同时只允许一个活动任务。服务重启时遗留任务恢复为可领取状态，并依靠 work item 与 LangGraph checkpoint 跳过已完成工作。
+## 两个 LangGraph 流水线
 
-## 数据与可信度
+两条流水线共享同一个 `AsyncSqliteSaver`，用 thread 前缀区分：
 
-V9 数据库持久化检索 revision、当前选择、逐篇分析和综合报告。文本证据定位原文和页码，视觉证据定位边界框和裁剪哈希，表格证据定位表格与单元格。
+- **Graph ① 检索图**（thread `{project}:search-{revision}:{track}`）：
+  `understand_request → generate_queries → search_papers → deduplicate_papers →
+  filter_papers → enrich_arxiv_abstracts → rank_papers → select_papers`。
+- **Graph ② 分析图**（thread `{project}:analysis:{run}`）：
+  `select_gate`（选文，interrupt）→ `acquire_documents` → `analyze_papers` →
+  `review_gate`（证据复核门，interrupt）→ `synthesize`，带 regenerate 回边。
 
-PDF 路径始终限制在项目工作区内，资源读取会重新验证项目归属和 SHA-256。视觉模型是新项目的强制前置能力；系统不自动下载模型，不以纯文本分析冒充完整多模态分析。
+## 持久化与断点续跑
 
-## 产品边界
+- 业务数据与 LangGraph checkpoint 存同一 SQLite（`DATABASE_PATH`）。
+- 后台 worker 是单机持久化队列：原子认领任务 → execute_job → 双写终态；重启时
+  `recover_interrupted()` 把遗留 running 任务放回队列。
+- 人工等待用 `hitl_events`（waiting_for_human）表达：图节点冻结运行，人工裁决动作再入队续跑。
+- 外部检索/解析调用按 work-item 参数指纹缓存，失败重试只补未完成部分。
+- 预算门：LLM 调用计量到 usage 台账，越过阈值在安全边界暂停（`AnalysisPausedError`）。
 
-ResearchPilot 的主流程为：检索文献 → 选择论文 → 证据化逐篇分析与双篇比较 → 证据复核。它不执行实验、不生成训练代码、不调度 GPU。SQLite 面向单机部署；当前仅支持学术 PDF。系统只呈现证据、差异、冲突和风险，不自动宣称研究方向具有创新性。
+## 存储
+
+- `data/research_pilot.db`：业务库 + LangGraph checkpoint。
+- `data/workspaces/{project}`：论文 PDF、解析产物、图表裁剪、manifest。
+- `data/oauth-proxy/`：独立 MCP 的 OAuth 状态（加密存储，已忽略不提交）。
+- `skills/`：技能定义（正文按需加载，受 `SKILL_MAX_BYTES` 限制）。

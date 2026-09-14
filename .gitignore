@@ -60,4 +60,10 @@ Desktop.ini
 # Notebook checkpoints
 .ipynb_checkpoints/
 
-# Agent/tooling metadata.agents/
+# Agent/tooling metadata
+.agents/
+
+# Internal audit and interview-prep notes (not part of the shipped project)
+CODE_SLIM_AUDIT.md
+audit_tmp/
+docs/interview_prep/

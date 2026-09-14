@@ -1,19 +1,14 @@
 from fastmcp import FastMCP
 
 from app.core.config import get_settings
-from app.documents import DocumentService, PDFParser, WorkspaceManager
+from app.documents import DocumentService
+from app.documents.service import create_document_service as _build_document_service
 from app.schemas import DocumentFigure, DocumentPage, ParsedDocument
 
 
 def create_document_service() -> DocumentService:
-    settings = get_settings()
-    workspace = WorkspaceManager(
-        settings.workspace_root, max_document_bytes=settings.document_max_bytes
-    )
-    return DocumentService(
-        workspace,
-        PDFParser(workspace, render_dpi=settings.document_render_dpi),
-    )
+    """Assemble the document subsystem from shared settings (one DPI knob)."""
+    return _build_document_service(get_settings())
 
 
 def create_document_server(

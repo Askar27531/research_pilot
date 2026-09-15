@@ -1,4 +1,4 @@
-from app.documents.acquisition import OpenAccessDownloader
+from app.documents.acquisition import OpenAccessDownloader, SourceGoneError
 from app.documents.errors import (
     DocumentError,
     DocumentNotFoundError,
@@ -19,6 +19,7 @@ __all__ = [
     "DocumentValidationError",
     "OpenAccessDownloader",
     "PDFParser",
+    "SourceGoneError",
     "WorkspaceManager",
     "create_document_service",
 ]

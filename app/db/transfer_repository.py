@@ -1,6 +1,5 @@
 from app.db.database import Database
 from app.db.errors import RecordNotFoundError
-from app.db.repositories import utc_now
 from app.schemas import PaperAcquisition
 
 

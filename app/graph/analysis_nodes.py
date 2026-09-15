@@ -25,10 +25,11 @@ from app.agents.paper_analysis import PART_LABELS
 from app.core.config import get_settings
 from app.db import PaperRepository
 from app.db.repositories import utc_now
-from app.documents.acquisition import OpenAccessDownloader
+from app.documents.acquisition import OpenAccessDownloader, SourceGoneError
 from app.literature import LiteratureToolClient
+from app.literature.open_access import open_access_candidates
 from app.reliability.faults import AnalysisPausedError
-from app.schemas import PaperAcquisition
+from app.schemas import OpenAccessLocation, PaperAcquisition, PaperMetadata
 
 
 class AnalysisJobStop(RuntimeError):
@@ -59,32 +60,160 @@ def _pause_message(reason: str, *, user: str, boundary: str) -> str:
     )
 
 
-async def _resolve_open_access_url(
+def _metadata_failure_reason(exc: Exception) -> str:
+    """Short, user-facing reason for a failed DOI metadata lookup.
+
+    The raw error is an MCP routing aggregate ("No MCP route completed
+    literature.metadata (tried: …)") and must not reach the UI. Callers keep the
+    untouched text in the run trace for diagnosis.
+    """
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and current not in chain:
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    text = " ".join(str(item) for item in chain).casefold()
+    if "api_key" in text or "auth" in text:
+        return "元数据服务未配置或密钥无效"
+    if "rate limit" in text or "429" in text:
+        return "元数据服务请求过于频繁，请稍后重试"
+    if any(word in text for word in ("reach", "timeout", "timed out", "connect", "endofstream")):
+        return "元数据服务暂时无法连接"
+    if "not found" in text or "no metadata source has" in text:
+        return "该 DOI 在各元数据源中均未收录"
+    return "元数据服务暂时不可用"
+
+
+async def _discover_open_access(
     literature: LiteratureToolClient, metadata
-) -> tuple[str | None, str | None]:
-    """Return a public PDF candidate, enriching DOI-only records through MCP."""
-    if metadata.open_access_url:
-        return str(metadata.open_access_url), None
+) -> tuple[list[str], str | None, str | None]:
+    """Return ``(candidate_urls, user_message, raw_detail)``.
+
+    Candidates come back ordered most-likely-to-download first (repository and
+    preprint copies before publisher pages). ``raw_detail`` carries the untouched
+    provider error so the caller can record it in the run trace, while
+    ``user_message`` is what the upload screen renders.
+    """
+    candidates = open_access_candidates(metadata)
+    if candidates:
+        return candidates, None, None
     if not metadata.doi:
-        return None, "检索元数据没有开放获取链接或 DOI，无法自动定位公开 PDF。"
+        return [], "检索元数据没有开放获取链接或 DOI，无法自动定位公开 PDF。", None
     try:
         enriched = await literature.get_paper_metadata(metadata.doi)
     except Exception as exc:  # noqa: BLE001 - manual upload remains the safe fallback
-        return None, f"已尝试通过 DOI 补查公开全文，但元数据查询失败：{exc}"
-    if enriched.open_access_url:
-        return str(enriched.open_access_url), None
-    return None, f"已通过 DOI {metadata.doi} 补查全文，但未发现开放获取 PDF。"
+        return (
+            [],
+            (
+                f"已尝试通过 DOI 补查公开全文，但{_metadata_failure_reason(exc)}，"
+                "可稍后重试或手动上传 PDF。"
+            ),
+            f"{type(exc).__name__}: {exc}",
+        )
+    refreshed = open_access_candidates(enriched)
+    if refreshed:
+        return refreshed, None, None
+    return [], f"已通过 DOI {metadata.doi} 补查全文，但未发现开放获取 PDF。", None
 
 
-def _arxiv_pdf_url(metadata) -> str | None:
-    """Return the canonical public PDF URL for an arXiv-sourced paper, if any."""
-    arxiv_id = metadata.arxiv_id or (
-        metadata.stable_id[len("arxiv:"):] if metadata.stable_id.startswith("arxiv:") else None
-    )
-    if not arxiv_id:
+async def _expand_open_access(
+    literature: LiteratureToolClient, metadata, already: set[str]
+) -> tuple[list[str], str | None]:
+    """Re-ask the metadata service once every stored candidate has failed.
+
+    Papers stored before full location capture carry only the single
+    ``open_access_url`` — typically the publisher page that just answered 403.
+    Without this second look the repository copies of the same paper would never
+    be seen at all.
+
+    Returns newly discovered URLs plus a raw failure detail for the trace.
+    """
+    if not metadata.doi:
+        return [], None
+    try:
+        enriched = await literature.get_paper_metadata(metadata.doi)
+    except Exception as exc:  # noqa: BLE001 - manual upload remains the fallback
+        return [], f"{type(exc).__name__}: {exc}"
+    return [url for url in open_access_candidates(enriched) if url not in already], None
+
+
+async def _attempt_downloads(
+    ctx: AnalysisGraphContext,
+    project_id: str,
+    paper_id: str,
+    urls: list[str],
+    attempted: set[str],
+    failures: list[str],
+    stale_urls: set[str],
+    acquisition: PaperAcquisition,
+    fallback_error: str | None,
+) -> PaperAcquisition:
+    """Download the first URL that works, returning the updated acquisition row."""
+    for candidate in urls:
+        if candidate in attempted:
+            continue
+        attempted.add(candidate)
+        try:
+            await ctx.transfer.upsert_acquisition(
+                acquisition.model_copy(update={"status": "downloading"})
+            )
+            content, final_url = await OpenAccessDownloader(
+                ctx.document_service.workspace.max_document_bytes
+            ).fetch(candidate)
+            entry = ctx.document_service.workspace.import_pdf_bytes(
+                project_id, f"{paper_id}.pdf", content
+            )
+            await ctx.capabilities.parse_document(project_id, entry.document_id)
+            linked = await ctx.documents.register(project_id, paper_id, entry)
+            return acquisition.model_copy(update={
+                "status": "parsed", "source_url": final_url,
+                "document_id": linked.document_id, "updated_at": utc_now(),
+            })
+        except Exception as exc:  # noqa: BLE001 - upload is the explicit fallback
+            if isinstance(exc, SourceGoneError):
+                # Permanently gone (404/410): remember it so the stored record can
+                # be corrected and later runs stop re-trying this URL.
+                stale_urls.add(candidate)
+            failures.append(f"{candidate}: {type(exc).__name__}: {str(exc)[:300]}")
+            acquisition = acquisition.model_copy(update={
+                "status": "awaiting_upload",
+                "error": "；".join(failures)[:1_000] if failures else fallback_error,
+                "updated_at": utc_now(),
+            })
+    return acquisition
+
+
+def _mark_locations_stale(
+    metadata: PaperMetadata, stale_urls: set[str]
+) -> PaperMetadata | None:
+    """Flag locations whose URL proved permanently gone.
+
+    Returns the corrected metadata, or ``None`` when nothing needed changing, so
+    the caller can skip a pointless database write.
+    """
+    if not stale_urls:
         return None
-    identifier = arxiv_id.strip().rstrip("/").rsplit("/", 1)[-1]
-    return f"https://arxiv.org/pdf/{identifier}"
+    locations: list[OpenAccessLocation] = []
+    changed = False
+    for location in metadata.oa_locations:
+        if location.url in stale_urls and not location.stale:
+            locations.append(location.model_copy(update={"stale": True}))
+            changed = True
+        else:
+            locations.append(location)
+    legacy = str(metadata.open_access_url) if metadata.open_access_url else None
+    # A stale legacy URL must be cleared too, otherwise open_access_candidates
+    # would simply re-add it as the single-URL compatibility candidate.
+    clear_legacy = legacy is not None and legacy in stale_urls
+    if changed and clear_legacy:
+        return metadata.model_copy(
+            update={"oa_locations": locations, "open_access_url": None}
+        )
+    if changed:
+        return metadata.model_copy(update={"oa_locations": locations})
+    if clear_legacy:
+        return metadata.model_copy(update={"open_access_url": None})
+    return None
 
 
 def make_select_gate_node(ctx: AnalysisGraphContext):
@@ -176,47 +305,78 @@ def make_acquire_documents_node(ctx: AnalysisGraphContext):
             acquisition = acquisitions.get(paper_id)
             if acquisition and acquisition.status == "parsed":
                 continue
-            source_url, discovery_error = await _resolve_open_access_url(
+            candidates, discovery_error, discovery_detail = await _discover_open_access(
                 ctx.literature, paper.metadata
             )
-            source_candidates: list[str] = []
-            if source_url:
-                source_candidates.append(source_url)
-            arxiv_url = _arxiv_pdf_url(paper.metadata)
-            if arxiv_url and arxiv_url not in source_candidates:
-                source_candidates.append(arxiv_url)
+            if discovery_detail:
+                # Keep the provider/MCP detail in the trace so the UI stays plain.
+                await ctx.traces.append(
+                    project_id,
+                    f"discovery-{paper_id}",
+                    "open_access_discovery_failed",
+                    success=False,
+                    agent="analysis_graph",
+                    summary={"paper_id": paper_id, "doi": paper.metadata.doi},
+                    error={"type": "metadata_lookup", "message": discovery_detail[:1_000]},
+                )
             acquisition = PaperAcquisition(
                 project_id=project_id, paper_id=paper_id, status="awaiting_upload",
-                source_url=source_url, error=discovery_error, updated_at=utc_now(),
+                source_url=candidates[0] if candidates else None,
+                error=discovery_error, updated_at=utc_now(),
             )
             failures: list[str] = []
-            for candidate in source_candidates:
-                try:
-                    await transfer.upsert_acquisition(
-                        acquisition.model_copy(update={"status": "downloading"})
+            attempted: set[str] = set()
+            stale_urls: set[str] = set()
+            acquisition = await _attempt_downloads(
+                ctx, project_id, paper_id, candidates, attempted, failures,
+                stale_urls, acquisition, discovery_error,
+            )
+            if acquisition.status != "parsed":
+                # Every stored candidate failed. Rows stored before full location
+                # capture only ever carried one URL (usually the publisher page
+                # that just answered 403), so look once more for the repository
+                # copies that were never recorded.
+                extra, refresh_detail = await _expand_open_access(
+                    ctx.literature, paper.metadata, attempted
+                )
+                if refresh_detail:
+                    await ctx.traces.append(
+                        project_id,
+                        f"expansion-{paper_id}",
+                        "open_access_expansion_failed",
+                        success=False,
+                        agent="analysis_graph",
+                        summary={"paper_id": paper_id, "doi": paper.metadata.doi},
+                        error={"type": "metadata_lookup", "message": refresh_detail[:1_000]},
                     )
-                    content, final_url = await OpenAccessDownloader(
-                        ctx.document_service.workspace.max_document_bytes
-                    ).fetch(candidate)
-                    entry = ctx.document_service.workspace.import_pdf_bytes(
-                        project_id, f"{paper_id}.pdf", content
+                if extra:
+                    await ctx.traces.append(
+                        project_id,
+                        f"expansion-{paper_id}",
+                        "open_access_candidates_expanded",
+                        success=True,
+                        agent="analysis_graph",
+                        summary={"paper_id": paper_id, "found": len(extra), "urls": extra[:5]},
                     )
-                    await ctx.capabilities.parse_document(project_id, entry.document_id)
-                    linked = await ctx.documents.register(project_id, paper_id, entry)
-                    acquisition = acquisition.model_copy(update={
-                        "status": "parsed", "source_url": final_url,
-                        "document_id": linked.document_id, "updated_at": utc_now(),
-                    })
-                    break
-                except Exception as exc:  # noqa: BLE001 - upload is the explicit fallback
-                    failures.append(
-                        f"{candidate}: {type(exc).__name__}: {str(exc)[:300]}"
+                    acquisition = await _attempt_downloads(
+                        ctx, project_id, paper_id, extra, attempted, failures,
+                        stale_urls, acquisition, discovery_error,
                     )
-                    acquisition = acquisition.model_copy(update={
-                        "status": "awaiting_upload",
-                        "error": "；".join(failures)[:1_000] if failures else discovery_error,
-                        "updated_at": utc_now(),
-                    })
+            corrected = _mark_locations_stale(paper.metadata, stale_urls)
+            if corrected is not None:
+                # Correct the stored record so a dead link is not re-tried on the
+                # next run (OpenAlex keeps serving the same stale URL).
+                await PaperRepository(ctx.database).save_metadata(
+                    project_id, paper_id, corrected
+                )
+                await ctx.traces.append(
+                    project_id,
+                    f"stale-{paper_id}",
+                    "open_access_locations_pruned",
+                    success=False,
+                    agent="analysis_graph",
+                    summary={"paper_id": paper_id, "stale": sorted(stale_urls)[:5]},
+                )
             await transfer.upsert_acquisition(acquisition)
             if acquisition.status != "parsed":
                 missing_ids.append(paper_id)

@@ -9,6 +9,7 @@ from app.db.database import Database
 from app.db.errors import ProjectConflictError, RecordNotFoundError
 from app.literature.deduplication import paper_key
 from app.schemas import (
+    PaperMetadata,
     ProjectRecord,
     RankedPaper,
     ResearchRequest,
@@ -453,6 +454,24 @@ class PaperRepository:
         if row is None:
             raise RuntimeError("Paper upsert did not return a row")
         return self._to_record(row)
+
+    async def save_metadata(
+        self, project_id: str, paper_id: str, metadata: PaperMetadata
+    ) -> None:
+        """Persist a corrected metadata record.
+
+        Used when a download attempt proves an open-access location permanently
+        gone (404/410): flagging it here stops every later run from re-trying a
+        link that OpenAlex has not refreshed.
+        """
+        async with self.database.connect() as connection:
+            cursor = await connection.execute(
+                "UPDATE papers SET metadata_json=?, updated_at=? WHERE project_id=? AND id=?",
+                (metadata.model_dump_json(), utc_now(), project_id, paper_id),
+            )
+            if cursor.rowcount == 0:
+                raise RecordNotFoundError("Paper not found")
+            await connection.commit()
 
     async def list_for_project(
         self, project_id: str, *, limit: int = 100, offset: int = 0

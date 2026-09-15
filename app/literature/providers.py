@@ -1,13 +1,16 @@
 import asyncio
+import html
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from time import monotonic, perf_counter
 from typing import ClassVar, Protocol
+from urllib.parse import quote
 
 import httpx
 
 from app.core.config import Settings, get_settings
+from app.literature.errors import LiteratureResponseError, PaperNotFoundError
 from app.literature.normalize import normalize_title
 from app.schemas import PaperAuthor, PaperMetadata, SearchResult
 
@@ -34,6 +37,16 @@ async def _get_with_retry(client: httpx.AsyncClient, url: str, **kwargs) -> http
             await asyncio.sleep(delay)
     response.raise_for_status()
     return response
+
+
+def bare_doi(value: str) -> str:
+    """Strip a DOI URL/prefix down to the bare ``10.x/...`` form."""
+    doi = value.strip()
+    lowered = doi.casefold()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if lowered.startswith(prefix):
+            return doi[len(prefix):].strip()
+    return doi
 
 
 class CrossrefProvider:
@@ -64,7 +77,7 @@ class CrossrefProvider:
             source_latency_ms=round((perf_counter() - started) * 1000))
 
     @staticmethod
-    def _map(item: dict, query: str) -> PaperMetadata:
+    def _map(item: dict, query: str | None = None) -> PaperMetadata:
         doi = item.get("DOI")
         title = " ".join(item.get("title") or []) or "Untitled"
         parts = item.get("published-print") or item.get("published-online") or {}
@@ -75,10 +88,47 @@ class CrossrefProvider:
         return PaperMetadata(stable_id=doi or f"crossref:{normalize_title(title)}:{year}",
             source_id=doi or normalize_title(title), title=title, authors=authors, year=year,
             abstract=item.get("abstract"), doi=doi,
-            venue=" ".join(item.get("container-title") or []) or None,
+            venue=html.unescape(" ".join(item.get("container-title") or [])).strip() or None,
+            publisher=(item.get("publisher") or "").strip() or None,
             citation_count=max(0, int(item.get("is-referenced-by-count") or 0)),
             source="crossref", sources=["crossref"], source_records=[record],
-            source_queries=[query])
+            source_queries=[query] if query else [])
+
+    async def get_paper_metadata(self, identifier: str) -> PaperMetadata:
+        """Resolve one DOI through Crossref's works endpoint.
+
+        A 404 is a real answer ("Crossref does not have this DOI") and returns
+        immediately, which is why ``_get_with_retry`` is not reusable here (it
+        raises before the status can be inspected). Transient failures — transport
+        errors, 429, 5xx — are retried with backoff: on a flaky link a single
+        connect failure must not turn a resolvable DOI into a permanent miss.
+        """
+        doi = bare_doi(identifier)
+        if not doi:
+            raise ValueError("identifier must not be empty")
+        url = f"{self.settings.crossref_base_url}/works/{quote(doi, safe='')}"
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            try:
+                response = await self.client.get(url)
+            except httpx.TransportError:
+                if attempt == attempts:
+                    raise
+                await asyncio.sleep(0.5 * 2 ** (attempt - 1))
+                continue
+            if response.status_code == 404:
+                raise PaperNotFoundError(f"Crossref has no record for DOI {doi}")
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt == attempts:
+                    response.raise_for_status()
+                await asyncio.sleep(0.5 * 2 ** (attempt - 1))
+                continue
+            response.raise_for_status()
+            message = (response.json() or {}).get("message")
+            if not isinstance(message, dict) or not message:
+                raise LiteratureResponseError(f"Crossref returned no metadata for DOI {doi}")
+            return self._map(message)
+        raise LiteratureResponseError(f"Crossref lookup failed for DOI {doi}")
 
     async def close(self) -> None:
         if self._owns_client:
@@ -148,6 +198,10 @@ def merge_papers(papers: Sequence[PaperMetadata]) -> list[PaperMetadata]:
             "abstract": current.abstract or paper.abstract,
             "doi": current.doi or paper.doi, "arxiv_id": current.arxiv_id or paper.arxiv_id,
             "open_access_url": current.open_access_url or paper.open_access_url,
+            # Journal / publisher: keep whichever source actually resolved them, so
+            # an arXiv-first record cannot blank out what Crossref or OpenAlex knew.
+            "venue": current.venue or paper.venue,
+            "publisher": current.publisher or paper.publisher,
             "citation_count": max(current.citation_count, paper.citation_count),
             "sources": sources, "source_records": records, "source_queries": queries,
         })

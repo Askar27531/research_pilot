@@ -1,11 +1,11 @@
 import asyncio
-import ipaddress
 import re
 import socket
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
+from app.core.urls import is_public_https_url
 from app.documents.errors import DocumentValidationError
 
 
@@ -22,8 +22,20 @@ class _LandingPageError(DocumentValidationError):
         self.html_body = html_body
 
 
+class SourceGoneError(DocumentValidationError):
+    """The URL is permanently gone (HTTP 404/410).
+
+    Callers strike this location from the paper's stored record, so a stale
+    OpenAlex link is not re-attempted on every subsequent run.
+    """
+
+
 _TRANSIENT_STATUS = {408, 425, 429, 500, 502, 503, 504}
 _BLOCKED_STATUS = {403, 418}
+_GONE_STATUS = {404, 410}
+#: Some bot-protection layers answer with a bare ``202 Accepted`` (figshare
+#: does). Combined with a non-PDF body that is a browser challenge, not content.
+_CHALLENGE_STATUS = 202
 _CITATION_PDF_RE = re.compile(r'citation_pdf_url"\s+content="([^"]+)"', re.IGNORECASE)
 _META_REFRESH_RE = re.compile(
     r'<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+content=["\']\s*\d+\s*;\s*url=([^"\'>]+)',
@@ -51,6 +63,7 @@ class OpenAccessDownloader:
         pending = [source_url]
         retries_left = self.max_retries
         errors: list[str] = []
+        gone = False
         while pending:
             candidate = pending.pop(0)
             try:
@@ -68,10 +81,19 @@ class OpenAccessDownloader:
                 if variant is None or variant == candidate:
                     break
                 pending.insert(0, variant)
+            except SourceGoneError as exc:
+                # Must precede the generic handler: a subclass caught there would
+                # be re-raised as its parent, losing the "gone for good" signal the
+                # caller needs to prune the location from the stored record.
+                errors.append(f"{candidate}: {exc}")
+                gone = True
+                break
             except DocumentValidationError as exc:
                 errors.append(f"{candidate}: {exc}")
                 break
         message = "；".join(errors)
+        if gone:
+            raise SourceGoneError(message[:2_000])
         raise DocumentValidationError(message[:2_000])
 
     async def _download_pdf(self, source_url: str) -> tuple[bytes, str]:
@@ -94,6 +116,10 @@ class OpenAccessDownloader:
                             continue
                         if response.status_code in _TRANSIENT_STATUS:
                             raise _TransientDownloadError(f"HTTP {response.status_code}")
+                        if response.status_code in _GONE_STATUS:
+                            raise SourceGoneError(
+                                f"开放获取链接已失效（HTTP {response.status_code}）"
+                            )
                         if response.status_code in _BLOCKED_STATUS:
                             raise DocumentValidationError(
                                 f"出版商拦截自动下载（HTTP {response.status_code}），"
@@ -105,6 +131,11 @@ class OpenAccessDownloader:
                             "content-type", ""
                         ).split(";", 1)[0].strip()
                         if media_type != "application/pdf":
+                            if response.status_code == _CHALLENGE_STATUS:
+                                raise DocumentValidationError(
+                                    "该站点要求浏览器验证（HTTP 202），自动下载被拒绝；"
+                                    "请手动上传 PDF 或改用其它开放获取副本"
+                                )
                             body = await _read_html_body(response)
                             raise _LandingPageError(current, body)
                         length = response.headers.get("content-length")
@@ -131,17 +162,24 @@ class OpenAccessDownloader:
 
     @staticmethod
     def _validate_public_https(value: str) -> None:
+        """Refuse anything the shared gate would not fetch, keeping the reason.
+
+        The verdict comes from :func:`is_public_https_url` so discovery,
+        prediction, and this downloader cannot disagree, but the specific error
+        is re-derived here because the two failure modes need different user
+        messages ("cannot be resolved" is retryable-looking, a non-public
+        address is a policy refusal).
+        """
+        if is_public_https_url(value):
+            return
         parsed = urlsplit(value)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             raise DocumentValidationError("Open access URLs must be public HTTPS URLs")
         try:
-            addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, 443)}
+            socket.getaddrinfo(parsed.hostname, 443)
         except OSError as exc:
             raise DocumentValidationError("Open access hostname cannot be resolved") from exc
-        for raw in addresses:
-            address = ipaddress.ip_address(raw)
-            if not address.is_global:
-                raise DocumentValidationError("Open access URL resolves to a non-public address")
+        raise DocumentValidationError("Open access URL resolves to a non-public address")
 
 
 async def _read_html_body(response: httpx.Response, cap: int = 1_000_000) -> str:

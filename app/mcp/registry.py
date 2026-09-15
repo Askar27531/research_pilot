@@ -24,6 +24,7 @@
 
 import asyncio  # 每台 server 一把锁：防止并发时对同一 in-process server 开两个 lifespan
 import json  # 解析配置文件 JSON
+import logging  # 不可路由的能力必须显式告警，而不是静默降级
 import os  # stdio 子进程 env 白名单 / http 鉴权 token 都从进程环境读
 from importlib.resources import files  # 读"安装包内"的默认配置（不依赖工作目录）
 from pathlib import Path
@@ -44,6 +45,8 @@ from app.mcp.models import (
     MCPServerStatus,  # 单台 server 的"运行期健康卡"（healthy/发现的工具/错误）
     MCPTemporaryError,  # 瞬时错误：可换一台 server 重试 / 由上层幂等兜底
 )
+
+logger = logging.getLogger(__name__)
 
 
 class MCPRegistry:
@@ -158,6 +161,23 @@ class MCPRegistry:
                     healthy=False,
                     last_error=f"{type(exc).__name__}: {str(exc)[:500]}",  # 截断防日志爆炸
                 )
+        unroutable = self.unroutable_capabilities()
+        if unroutable:
+            # 显式降级告警：这些能力一台健康提供者都没有，调用时只会得到
+            # "No healthy MCP server provides X"。不告警就等于静默失效。
+            logger.warning(
+                "MCP capabilities with no healthy provider: %s — see GET /mcp/status",
+                ", ".join(unroutable),
+            )
+
+    def unroutable_capabilities(self) -> list[str]:
+        """配置里声明了、但当前没有任何健康提供者的能力名。
+
+        这类能力被调用时只会抛 "No healthy MCP server provides X"，即功能静默
+        失效；discover() 会在启动日志里告警，public_status() 也会把它列出来。
+        """
+        declared = sorted({c for s in self.config.servers for c in s.capabilities})
+        return [capability for capability in declared if not self.candidates(capability)]
 
     def candidates(self, capability: str) -> list[tuple[MCPServerConfig, str]]:
         """按能力名选出"现在能用的提供者"，按优先级排序。
@@ -232,6 +252,9 @@ class MCPRegistry:
                     c for s in self.config.servers for c in s.capabilities
                 })
             },
+            # 声明了却无路可走的能力：路由为空数组时功能是静默失效的，
+            # 单独列出来让"降级"变成可观测事实。
+            "unroutable_capabilities": self.unroutable_capabilities(),
         }
 
 

@@ -9,6 +9,7 @@ from app.literature import (
     MultiSourceLiteratureProvider,
     OpenAlexClient,
 )
+from app.literature.errors import LiteratureUnavailableError, PaperNotFoundError
 from app.schemas import PaperMetadata, SearchResult
 
 
@@ -68,9 +69,31 @@ def create_literature_server(
             raise RuntimeError("FastMCP context is unavailable")
         literature = ctx.lifespan_context["literature"]
         if isinstance(literature, MultiSourceLiteratureProvider):
-            # DOI lookup remains authoritative through OpenAlex; search falls back to all sources.
-            openalex = literature.providers["openalex"]
-            return await openalex.get_paper_metadata(identifier)  # type: ignore[attr-defined]
+            # OpenAlex stays authoritative for DOI lookup (search already falls
+            # back across sources), but a single provider must not be a single
+            # point of failure: Crossref answers when OpenAlex is unreachable,
+            # rate-limited, missing a key, or simply does not index that DOI.
+            try:
+                return await literature.providers["openalex"].get_paper_metadata(  # type: ignore[attr-defined]
+                    identifier
+                )
+            except Exception as primary:
+                crossref = literature.providers.get("crossref")
+                if crossref is None:
+                    raise
+                try:
+                    return await crossref.get_paper_metadata(identifier)  # type: ignore[attr-defined]
+                except Exception as fallback:
+                    if isinstance(primary, PaperNotFoundError) and isinstance(
+                        fallback, PaperNotFoundError
+                    ):
+                        raise PaperNotFoundError(
+                            f"No metadata source has {identifier} "
+                            f"(OpenAlex: {primary}; Crossref: {fallback})"
+                        ) from fallback
+                    raise LiteratureUnavailableError(
+                        f"OpenAlex failed ({primary}); Crossref failed ({fallback})"
+                    ) from fallback
         return await literature.get_paper_metadata(identifier)  # type: ignore[attr-defined]
 
     return server

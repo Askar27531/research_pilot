@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 from collections.abc import Sequence
 from typing import Any
@@ -7,6 +8,11 @@ from typing import Any
 from app.literature.providers import merge_papers
 from app.mcp.registry import CapabilityRouter
 from app.schemas import PaperAuthor, PaperMetadata, SearchResult
+
+logger = logging.getLogger(__name__)
+
+#: 已经告警过的"无路可走"能力：避免每篇论文刷一条同样的日志。
+_warned_unroutable: set[str] = set()
 
 
 def _unwrap(value: Any) -> Any:
@@ -230,14 +236,29 @@ class LiteratureCapabilityClient:
 
         Returns None (never raises) when the external capability is unavailable
         or returns an unparsable payload; callers fall back to partial metadata.
+        A capability with no healthy provider is warned about once (it is a
+        configuration fault, not a transient miss), so "best effort" does not
+        turn into a silent, permanent feature outage.
         """
         if not arxiv_id:
             return None
+        capability = "literature.metadata.arxiv"
         try:
             return await self.router.call(
-                "literature.metadata.arxiv",
+                capability,
                 {"paper_id": arxiv_id.strip()},
                 result_adapter=lambda result: _arxiv_abstract_metadata(arxiv_id, result),
             )
-        except Exception:  # noqa: BLE001 - enrichment is best effort
+        except Exception as exc:  # noqa: BLE001 - enrichment is best effort
+            if not self.router.registry.candidates(capability):
+                if capability not in _warned_unroutable:
+                    _warned_unroutable.add(capability)
+                    logger.warning(
+                        "arXiv abstract enrichment is disabled: no healthy provider "
+                        "for %s (%s) — see GET /mcp/status",
+                        capability,
+                        exc,
+                    )
+            else:
+                logger.debug("arXiv abstract enrichment failed for %s: %s", arxiv_id, exc)
             return None

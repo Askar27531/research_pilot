@@ -49,6 +49,7 @@ from app.schemas.evidence import (
 )
 from app.schemas.literature import (
     FullTextAvailability,
+    OpenAccessCandidate,
     OpenAccessLocation,
     PaperAuthor,
     PaperMetadata,
@@ -120,6 +121,7 @@ __all__ = [
     "LoadedSkill",
     "MethodAnalysisDraft",
     "MissingDocument",
+    "OpenAccessCandidate",
     "OpenAccessLocation",
     "PageInput",
     "PaperAcquisition",

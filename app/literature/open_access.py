@@ -13,7 +13,12 @@ from __future__ import annotations
 from urllib.parse import urlsplit
 
 from app.core.urls import is_https_shaped_url
-from app.schemas import FullTextAvailability, OpenAccessLocation, PaperMetadata
+from app.schemas import (
+    FullTextAvailability,
+    OpenAccessCandidate,
+    OpenAccessLocation,
+    PaperMetadata,
+)
 
 #: Publishers whose PDF endpoints most often answer a bot with 403. Ranking only
 #: reorders these — a publisher copy is still tried last, never dropped outright,
@@ -113,10 +118,13 @@ def _is_publisher(location: OpenAccessLocation) -> bool:
 def _rank_key(location: OpenAccessLocation) -> tuple[int, int, int, int, str]:
     """Sort key, best first: repositories, unknown hosts, publishers, indexes.
 
-    Within a tier: open copies first, then direct PDFs, then accepted/submitted
-    versions — those are the ones that live in repositories rather than on the
-    publisher's own site. Indexes are tested first because OpenAlex types them as
-    repositories even though they never host the full text themselves.
+    Within a tier: a recorded PDF endpoint first, then open copies, then
+    accepted/submitted versions — those are the ones that live in repositories
+    rather than on the publisher's own site. The PDF flag outranks ``is_oa``
+    because a landing page has to be scraped for its file URL (and sometimes
+    cannot be), while a PDF endpoint downloads directly. Indexes are tested
+    first because OpenAlex types them as repositories even though they never
+    host the full text themselves.
     """
     if _is_index(location):
         tier = 3
@@ -129,8 +137,8 @@ def _rank_key(location: OpenAccessLocation) -> tuple[int, int, int, int, str]:
     version = (location.version or "").casefold()
     return (
         tier,
-        0 if location.is_oa else 1,
         0 if location.pdf_url else 1,
+        0 if location.is_oa else 1,
         0 if version in {"acceptedversion", "submittedversion"} else 1,
         location.url,
     )
@@ -149,12 +157,17 @@ def arxiv_pdf_url(metadata: PaperMetadata) -> str | None:
     return f"https://arxiv.org/pdf/{identifier}"
 
 
-def open_access_candidates(metadata: PaperMetadata) -> list[str]:
+def open_access_candidates_detailed(metadata: PaperMetadata) -> list[OpenAccessCandidate]:
     """Every URL worth trying for the full text, most likely to succeed first.
 
     Publisher locations that are not open access are skipped outright: a paywalled
     publisher page cannot serve a PDF without entitlement, so attempting it only
     spends a request to collect a guaranteed 403.
+
+    Each location contributes its *best* URL — the PDF endpoint when OpenAlex
+    recorded one, else the landing page — and reports which of the two it is.
+    ``open_access_candidates`` throws that distinction away, which is why callers
+    needing to judge downloadability must use this function instead.
     """
     usable = [
         location
@@ -170,21 +183,42 @@ def open_access_candidates(metadata: PaperMetadata) -> list[str]:
         # Rows stored before oa_locations existed carry only this single URL.
         usable.append(OpenAccessLocation(url=legacy, is_oa=True))
 
-    ordered: list[str] = []
+    candidates: list[OpenAccessCandidate] = []
+    seen: set[str] = set()
     for location in sorted(usable, key=_rank_key):
-        if location.url not in ordered:
-            ordered.append(location.url)
+        url = location.pdf_url or location.url
+        if url in seen:
+            continue
+        seen.add(url)
+        candidates.append(
+            OpenAccessCandidate(
+                url=url,
+                is_pdf=bool(location.pdf_url),
+                source_type=location.source_type,
+                version=location.version,
+                is_oa=location.is_oa,
+            )
+        )
 
     # A synthesized arXiv PDF is a preprint-repository copy, so it belongs ahead
     # of any publisher URL — otherwise a blocking publisher link shadows it.
     arxiv = arxiv_pdf_url(metadata)
-    if arxiv and arxiv not in ordered:
+    if arxiv and arxiv not in seen:
         position = next(
-            (index for index, url in enumerate(ordered) if is_publisher_host(url)),
-            len(ordered),
+            (index for index, item in enumerate(candidates) if is_publisher_host(item.url)),
+            len(candidates),
         )
-        ordered.insert(position, arxiv)
-    return ordered
+        candidates.insert(
+            position,
+            OpenAccessCandidate(url=arxiv, is_pdf=True, source_type="repository",
+                                is_oa=True, synthesized=True),
+        )
+    return candidates
+
+
+def open_access_candidates(metadata: PaperMetadata) -> list[str]:
+    """URL-only view of :func:`open_access_candidates_detailed`."""
+    return [candidate.url for candidate in open_access_candidates_detailed(metadata)]
 
 
 #: Host label for a location we cannot match to a known publisher or index.
@@ -214,24 +248,34 @@ def _tier_of(url: str) -> int:
 def predict_full_text(metadata: PaperMetadata) -> FullTextAvailability:
     """Guess, from metadata alone, whether the PDF can be auto-downloaded.
 
-    Deliberately reuses :func:`open_access_candidates` instead of re-deriving
-    the rules, so this label can never drift from what acquisition will
-    actually attempt. The tier of the first candidate decides the verdict: a
-    repository or preprint copy downloads over plain HTTP, while a publisher
-    endpoint is the one that answers 403 and ends in a manual upload.
+    Deliberately reuses :func:`open_access_candidates_detailed` instead of
+    re-deriving the rules, so this label can never drift from what acquisition
+    will actually attempt. Two signals then decide the verdict:
 
-    Never a promise: a repository link can still 404 and a publisher link can
-    still happen to be open, so the wording stays predictive throughout.
+    * the *tier* of the first usable candidate — a publisher endpoint is the one
+      that answers 403 and ends in a manual upload;
+    * whether that candidate is the location's own **PDF endpoint** or merely a
+      landing page. This is the distinction that matters most in practice: a
+      repository landing page still has to be scraped for its file URL, and real
+      records (Coventry's Pure portal, for one) serve that file URL behind a WAF
+      that answers 403. Only a recorded PDF endpoint justifies "可直接获取".
+
+    Never a promise: a repository PDF can still 404, so ``direct`` means "this is
+    the real file URL on a host that does not block us", not "this will work".
     """
     # Presence in metadata is not the same as being fetchable: OpenAlex records
     # ``http://`` links and bare repository handles that the downloader refuses
     # outright. Counting those as usable would label a paper "可直接获取" and
     # then fail every attempt, which is precisely the promise this must not make.
-    shaped = [url for url in open_access_candidates(metadata) if is_https_shaped_url(url)]
+    shaped = [
+        candidate
+        for candidate in open_access_candidates_detailed(metadata)
+        if is_https_shaped_url(candidate.url)
+    ]
     # ``doi.org`` resolves to whoever owns the record — usually the publisher
     # that blocks us. It is a lookup, not a location, so it only becomes the
     # verdict when nothing better was recorded.
-    usable = [url for url in shaped if not is_doi_resolver_url(url)]
+    usable = [c for c in shaped if not is_doi_resolver_url(c.url)]
     if not usable:
         if metadata.doi:
             if shaped:
@@ -261,16 +305,27 @@ def predict_full_text(metadata: PaperMetadata) -> FullTextAvailability:
             detail="元数据既无开放获取链接也无 DOI，无法自动定位公开 PDF。",
         )
 
-    # ``open_access_candidates`` already returns its URLs best-first, so the head
-    # of the list is exactly what the downloader would attempt first.
+    # Candidates come back best-first, so the head is exactly what the downloader
+    # would attempt first.
     best = usable[0]
-    host = _host_label(best)
-    tier = _tier_of(best)
+    host = _host_label(best.url)
+    tier = _tier_of(best.url)
     if tier < 2:
+        if best.is_pdf:
+            return FullTextAvailability(
+                level="direct",
+                label="可直接获取",
+                detail=f"首选来源为开放获取副本的 PDF 直链（{host}），可直接下载。",
+                host=host,
+                candidates=len(usable),
+            )
         return FullTextAvailability(
-            level="direct",
-            label="可直接获取",
-            detail=f"首选来源为开放获取副本（{host}），通常可直接下载。",
+            level="likely",
+            label="需跳转解析",
+            detail=(
+                f"首要来源是开放获取页面（{host}），需从页面解析出 PDF 直链；"
+                "解析失败或该站点拦截时，会提示手动上传。"
+            ),
             host=host,
             candidates=len(usable),
         )

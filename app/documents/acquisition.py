@@ -46,7 +46,7 @@ _META_REFRESH_RE = re.compile(
 class OpenAccessDownloader:
     def __init__(self, max_bytes: int, *, max_redirects: int = 3,
                  timeout_seconds: float = 30, connect_timeout: float = 10,
-                 max_retries: int = 2) -> None:
+                 max_retries: int = 3) -> None:
         self.max_bytes = max_bytes
         self.max_redirects = max_redirects
         self.timeout_seconds = timeout_seconds
@@ -56,109 +56,118 @@ class OpenAccessDownloader:
     async def fetch(self, source_url: str) -> tuple[bytes, str]:
         """Download one open-access PDF, following derived file URLs on landing pages.
 
-        Transport/timeout errors are retried up to ``max_retries`` times. Publisher
-        blocks and pages without a derivable PDF fail fast with a readable message
-        so the caller falls back to manual upload.
+        Transport/timeout errors are retried up to ``max_retries`` times, and the
+        whole walk shares one connection pool: reconnecting for every attempt is
+        what turned a flaky TLS path into a permanent failure, because each retry
+        paid a fresh handshake that could fail on its own. Publisher blocks and
+        pages without a derivable PDF fail fast with a readable message so the
+        caller falls back to manual upload.
         """
         pending = [source_url]
-        retries_left = self.max_retries
+        attempts: dict[str, int] = {}
         errors: list[str] = []
         gone = False
-        while pending:
-            candidate = pending.pop(0)
-            try:
-                return await self._download_pdf(candidate)
-            except _TransientDownloadError as exc:
-                errors.append(f"{candidate}: {type(exc).__name__}: {exc}")
-                if retries_left <= 0:
-                    break
-                retries_left -= 1
-                await asyncio.sleep(0.5 * (self.max_retries - retries_left + 1))
-                pending.append(candidate)
-            except _LandingPageError as exc:
-                errors.append(f"{candidate}: 返回的是文章落地页而非 PDF 直链")
-                variant = _pdf_variant_url(exc)
-                if variant is None or variant == candidate:
-                    break
-                pending.insert(0, variant)
-            except SourceGoneError as exc:
-                # Must precede the generic handler: a subclass caught there would
-                # be re-raised as its parent, losing the "gone for good" signal the
-                # caller needs to prune the location from the stored record.
-                errors.append(f"{candidate}: {exc}")
-                gone = True
-                break
-            except DocumentValidationError as exc:
-                errors.append(f"{candidate}: {exc}")
-                break
-        message = "；".join(errors)
-        if gone:
-            raise SourceGoneError(message[:2_000])
-        raise DocumentValidationError(message[:2_000])
-
-    async def _download_pdf(self, source_url: str) -> tuple[bytes, str]:
-        current = source_url
         timeout = httpx.Timeout(self.timeout_seconds, connect=self.connect_timeout)
         async with httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=False,
             headers={"Accept": "application/pdf"},
         ) as client:
-            for _ in range(self.max_redirects + 1):
-                self._validate_public_https(current)
+            while pending:
+                candidate = pending.pop(0)
                 try:
-                    async with client.stream("GET", current) as response:
-                        if response.status_code in {301, 302, 303, 307, 308}:
-                            location = response.headers.get("location")
-                            if not location:
-                                raise DocumentValidationError("PDF redirect has no location")
-                            current = urljoin(current, location)
-                            continue
-                        if response.status_code in _TRANSIENT_STATUS:
-                            raise _TransientDownloadError(f"HTTP {response.status_code}")
-                        if response.status_code in _GONE_STATUS:
-                            raise SourceGoneError(
-                                f"开放获取链接已失效（HTTP {response.status_code}）"
-                            )
-                        if response.status_code in _BLOCKED_STATUS:
+                    return await self._download_pdf(candidate, client)
+                except _TransientDownloadError as exc:
+                    used = attempts.get(candidate, 0)
+                    if used >= self.max_retries:
+                        errors.append(
+                            f"{candidate}: 网络连接不稳定，已重试 {used} 次仍失败"
+                            f"（{exc}）；可稍后重试或手动上传 PDF"
+                        )
+                        continue
+                    attempts[candidate] = used + 1
+                    await asyncio.sleep(0.5 * (used + 1))
+                    pending.append(candidate)
+                except _LandingPageError as exc:
+                    errors.append(f"{candidate}: 返回的是文章落地页而非 PDF 直链")
+                    variant = _pdf_variant_url(exc)
+                    if variant is None or variant == candidate:
+                        continue
+                    pending.insert(0, variant)
+                except SourceGoneError as exc:
+                    # Must precede the generic handler: a subclass caught there would
+                    # be re-raised as its parent, losing the "gone for good" signal the
+                    # caller needs to prune the location from the stored record.
+                    errors.append(f"{candidate}: {exc}")
+                    gone = True
+                    continue
+                except DocumentValidationError as exc:
+                    errors.append(f"{candidate}: {exc}")
+                    continue
+        message = "；".join(errors)
+        if gone:
+            raise SourceGoneError(message[:2_000])
+        raise DocumentValidationError(message[:2_000])
+
+    async def _download_pdf(
+        self, source_url: str, client: httpx.AsyncClient
+    ) -> tuple[bytes, str]:
+        current = source_url
+        for _ in range(self.max_redirects + 1):
+            self._validate_public_https(current)
+            try:
+                async with client.stream("GET", current) as response:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("location")
+                        if not location:
+                            raise DocumentValidationError("PDF redirect has no location")
+                        current = urljoin(current, location)
+                        continue
+                    if response.status_code in _TRANSIENT_STATUS:
+                        raise _TransientDownloadError(f"HTTP {response.status_code}")
+                    if response.status_code in _GONE_STATUS:
+                        raise SourceGoneError(
+                            f"开放获取链接已失效（HTTP {response.status_code}）"
+                        )
+                    if response.status_code in _BLOCKED_STATUS:
+                        raise DocumentValidationError(
+                            f"出版商拦截自动下载（HTTP {response.status_code}），"
+                            "请手动上传 PDF 或改用开放获取副本"
+                        )
+                    if response.status_code >= 400:
+                        raise DocumentValidationError(f"HTTP {response.status_code}")
+                    media_type = response.headers.get(
+                        "content-type", ""
+                    ).split(";", 1)[0].strip()
+                    if media_type != "application/pdf":
+                        if response.status_code == _CHALLENGE_STATUS:
                             raise DocumentValidationError(
-                                f"出版商拦截自动下载（HTTP {response.status_code}），"
-                                "请手动上传 PDF 或改用开放获取副本"
+                                "该站点要求浏览器验证（HTTP 202），自动下载被拒绝；"
+                                "请手动上传 PDF 或改用其它开放获取副本"
                             )
-                        if response.status_code >= 400:
-                            raise DocumentValidationError(f"HTTP {response.status_code}")
-                        media_type = response.headers.get(
-                            "content-type", ""
-                        ).split(";", 1)[0].strip()
-                        if media_type != "application/pdf":
-                            if response.status_code == _CHALLENGE_STATUS:
-                                raise DocumentValidationError(
-                                    "该站点要求浏览器验证（HTTP 202），自动下载被拒绝；"
-                                    "请手动上传 PDF 或改用其它开放获取副本"
-                                )
-                            body = await _read_html_body(response)
-                            raise _LandingPageError(current, body)
-                        length = response.headers.get("content-length")
-                        if length and int(length) > self.max_bytes:
-                            raise DocumentValidationError("Open access PDF exceeds the size limit")
-                        chunks: list[bytes] = []
-                        size = 0
-                        async for chunk in response.aiter_bytes():
-                            size += len(chunk)
-                            if size > self.max_bytes:
-                                raise DocumentValidationError(
-                                    "Open access PDF exceeds the size limit"
-                                )
-                            chunks.append(chunk)
-                        content = b"".join(chunks)
-                        if not content.startswith(b"%PDF-"):
+                        body = await _read_html_body(response)
+                        raise _LandingPageError(current, body)
+                    length = response.headers.get("content-length")
+                    if length and int(length) > self.max_bytes:
+                        raise DocumentValidationError("Open access PDF exceeds the size limit")
+                    chunks: list[bytes] = []
+                    size = 0
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > self.max_bytes:
                             raise DocumentValidationError(
-                                "Open access content has an invalid PDF signature"
+                                "Open access PDF exceeds the size limit"
                             )
-                        return content, current
-                except httpx.HTTPError as exc:
-                    raise _TransientDownloadError(f"{type(exc).__name__}: {exc}") from exc
-        raise DocumentValidationError("Open access PDF exceeded the redirect limit")
+                        chunks.append(chunk)
+                    content = b"".join(chunks)
+                    if not content.startswith(b"%PDF-"):
+                        raise DocumentValidationError(
+                            "Open access content has an invalid PDF signature"
+                        )
+                    return content, current
+            except httpx.HTTPError as exc:
+                raise _TransientDownloadError(f"{type(exc).__name__}: {exc}") from exc
+            raise DocumentValidationError("Open access PDF exceeded the redirect limit")
 
     @staticmethod
     def _validate_public_https(value: str) -> None:

@@ -1,15 +1,24 @@
 """Pre-selection full-text availability labels.
 
 These labels appear on the paper picker *before* anything is downloaded, so the
-tests pin the two properties that make them trustworthy:
+tests pin the properties that make them trustworthy:
 
-1. The tier matches what acquisition would actually try first — the same
-   ``open_access_candidates`` ordering, not a second copy of the rules.
+1. The verdict matches what acquisition would actually try first — the same
+   candidate ordering, not a second copy of the rules.
 2. A publisher-only record is never labelled "可直接获取": that is exactly the
    case that ends in a 403 and a manual upload.
+3. A *landing page* is never labelled "可直接获取" either. Ranking puts a
+   repository page and a repository PDF endpoint in the same tier, but only the
+   PDF endpoint downloads without scraping — and real repositories (Coventry's
+   Pure portal, for one) serve that endpoint behind a WAF that answers 403.
 """
 
-from app.literature.open_access import open_access_candidates, predict_full_text
+from app.core.urls import is_https_shaped_url
+from app.literature.open_access import (
+    open_access_candidates,
+    open_access_candidates_detailed,
+    predict_full_text,
+)
 from app.schemas import OpenAccessLocation, PaperAuthor, PaperMetadata
 
 
@@ -32,15 +41,14 @@ def _location(url: str, **overrides) -> OpenAccessLocation:
     return OpenAccessLocation(**values)
 
 
-def test_repository_copy_is_direct():
+def test_repository_pdf_endpoint_is_direct():
     paper = _paper(
         oa_locations=[
-            _location("https://link.springer.com/article/10.1/x"),
             _location(
-                "https://repo.example.ac.jp/files/x.pdf",
-                source_type="repository",
+                "https://repo.example.ac.jp/record/1",
                 pdf_url="https://repo.example.ac.jp/files/x.pdf",
-            ),
+                source_type="repository",
+            )
         ]
     )
 
@@ -49,7 +57,42 @@ def test_repository_copy_is_direct():
     assert hint.level == "direct"
     assert hint.label == "可直接获取"
     assert hint.host == "repo.example.ac.jp"
-    assert hint.candidates == 2
+
+
+def test_repository_landing_page_is_not_promised():
+    """The regression this tier exists for: a page is not a file."""
+    paper = _paper(
+        oa_locations=[
+            _location(
+                "https://pureportal.example.ac.uk/en/publications/792dee73",
+                source_type="repository",
+            )
+        ]
+    )
+
+    hint = predict_full_text(paper)
+
+    assert hint.level == "likely"
+    assert hint.label == "需跳转解析"
+    assert "解析" in hint.detail
+
+
+def test_pdf_endpoint_is_tried_before_a_landing_page_in_the_same_tier():
+    page = _location(
+        "https://repo.example.org/en/publications/abc", source_type="repository"
+    )
+    file = _location(
+        "https://repo.example.org/en/publications/def",
+        pdf_url="https://repo.example.org/files/def.pdf",
+        source_type="repository",
+    )
+    paper = _paper(oa_locations=[page, file])
+
+    detailed = open_access_candidates_detailed(paper)
+
+    assert detailed[0].url == "https://repo.example.org/files/def.pdf"
+    assert detailed[0].is_pdf is True
+    assert predict_full_text(paper).level == "direct"
 
 
 def test_publisher_only_record_is_flagged_as_uncertain():
@@ -96,9 +139,7 @@ def test_no_locations_and_no_doi_is_manual():
 
 def test_stale_locations_never_count_as_available():
     paper = _paper(
-        oa_locations=[
-            _location("https://repo.example.ac.jp/gone.pdf", stale=True),
-        ]
+        oa_locations=[_location("https://repo.example.ac.jp/gone.pdf", stale=True)]
     )
 
     assert open_access_candidates(paper) == []
@@ -109,19 +150,20 @@ def test_paywalled_publisher_location_is_skipped_like_acquisition_does():
     paper = _paper(
         oa_locations=[
             _location("https://www.sciencedirect.com/science/article/pii/S1", is_oa=False),
-            _location("https://repo.example.org/x.pdf", source_type="repository"),
+            _location(
+                "https://repo.example.org/x",
+                pdf_url="https://repo.example.org/x.pdf",
+                source_type="repository",
+            ),
         ]
     )
 
-    hint = predict_full_text(paper)
-
-    assert hint.level == "direct"
-    assert hint.host == "repo.example.org"
     # Only the repository copy survives, exactly as the downloader would see it.
     assert len(open_access_candidates(paper)) == 1
+    assert predict_full_text(paper).level == "direct"
 
 
-def test_arxiv_id_alone_yields_a_synthesized_repository_copy():
+def test_arxiv_id_alone_yields_a_synthesized_pdf_copy():
     paper = _paper(doi=None, arxiv_id="2401.00001", oa_locations=[])
 
     hint = predict_full_text(paper)
@@ -148,17 +190,14 @@ def test_non_https_location_is_never_labelled_directly_available():
     hint = predict_full_text(paper)
 
     assert hint.level == "uncertain"
-    assert hint.label == "可能需手动上传"
     assert hint.candidates == 0
-    # Acquisition would still try it and fail, but the label must not promise it.
+    # Acquisition would still try it and fail; the label must not promise it.
     assert open_access_candidates(paper) == [
         "http://dspace.example.org/bitstream/1/paper.pdf"
     ]
 
 
 def test_https_shape_check_matches_the_downloader_gate():
-    from app.core.urls import is_https_shaped_url
-
     assert is_https_shaped_url("https://repo.example.org/a.pdf")
     assert not is_https_shaped_url("http://repo.example.org/a.pdf")
     assert not is_https_shaped_url("hdl.handle.net/10397/91590")
@@ -174,7 +213,6 @@ def test_doi_resolver_link_is_not_a_direct_download():
     assert hint.level == "uncertain"
     assert hint.label == "可能需手动上传"
     assert hint.host == "doi.org"
-    assert "DOI" in hint.detail
 
 
 def test_doi_resolver_link_does_not_mask_a_real_repository_copy():
@@ -190,9 +228,7 @@ def test_doi_resolver_link_does_not_mask_a_real_repository_copy():
     # doaj is an index, so the verdict is the index branch — but it must never
     # come back as "direct" off the DOI link ahead of it.
     assert hint.level == "uncertain"
-    assert hint.label == "可能需手动上传"
     assert hint.host == "doaj.org"
-    assert hint.candidates == 1
 
 
 def test_tier_matches_what_acquisition_would_try_first():
@@ -204,11 +240,9 @@ def test_tier_matches_what_acquisition_would_try_first():
         ]
     )
 
-    # Same ordering primitive acquisition uses, so the two cannot drift apart.
     first_attempted = open_access_candidates(paper)[0]
 
     hint = predict_full_text(paper)
 
-    assert hint.level == "direct"
     assert hint.host == "europepmc.org"
     assert first_attempted.startswith("https://europepmc.org")

@@ -93,6 +93,26 @@ class SearchPapersInput(BaseModel):
         return self
 
 
+class OpenAccessCandidate(BaseModel):
+    """One URL acquisition could try, with the context that makes it judgeable.
+
+    Ranking alone cannot answer "will this download?" — a repository *landing
+    page* and a repository *PDF endpoint* rank in the same tier, yet only the
+    second one yields a file without HTML scraping. Carrying ``is_pdf`` through
+    from the stored location is what lets the selection page tell them apart,
+    instead of promising a download for every non-publisher host.
+    """
+
+    url: str = Field(min_length=1)
+    #: True when this URL is the location's own PDF endpoint rather than a page.
+    is_pdf: bool = False
+    source_type: str | None = None
+    version: str | None = None
+    is_oa: bool = False
+    #: True for the synthesized arXiv preprint copy, which is not a stored location.
+    synthesized: bool = False
+
+
 class FullTextAvailability(BaseModel):
     """Pre-download guess at whether a paper's PDF can be fetched automatically.
 

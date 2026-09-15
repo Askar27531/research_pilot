@@ -369,7 +369,6 @@ _FULL_TEXT_BADGES = {
     "manual": (":material/upload_file:", "gray"),
 }
 
-
 def _render_full_text_hint(paper: dict) -> None:
     """Badge the pre-selection guess at whether the PDF can be auto-downloaded.
 
@@ -405,14 +404,19 @@ def render_paper_selection(project_id: str, workspace: dict) -> None:
 
     papers = workspace.get("literature") or []
     st.subheader(f"选择论文（当前结果 {len(papers)} 篇）")
-    direct = sum(
-        1 for paper in papers
-        if (paper.get("full_text_hint") or {}).get("level") == "direct"
-    )
-    if direct:
+
+    def _hint_level(paper: dict) -> str | None:
+        return (paper.get("full_text_hint") or {}).get("level")
+
+    direct = sum(1 for paper in papers if _hint_level(paper) == "direct")
+    parse_needed = sum(1 for paper in papers if _hint_level(paper) == "likely")
+    manual_risk = sum(1 for paper in papers if _hint_level(paper) in {"uncertain", "manual"})
+    if direct or parse_needed or manual_risk:
         st.caption(
-            f"其中 {direct} 篇标注为“可直接获取”（开放获取副本，通常无需手动上传）。"
-            "该标注由元数据推断，仅供参考；若自动下载失败，系统会提示手动上传 PDF。"
+            f"可直接获取 {direct} 篇 · 需跳转解析 {parse_needed} 篇 · "
+            f"可能需手动上传 {manual_risk} 篇。"
+            "标注由元数据推断，仅供参考：即便标为“可直接获取”，"
+            "目标站点仍可能拦截自动下载，失败时会提示手动上传 PDF。"
         )
     filter_text = st.text_input("筛选标题或作者", key="selection_filter")
     visible = [paper for paper in papers if filter_text.casefold() in (

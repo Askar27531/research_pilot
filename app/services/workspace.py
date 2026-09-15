@@ -29,6 +29,7 @@ from app.evidence.review_desk import (
     filter_rows,
     impact_preview,
 )
+from app.literature.open_access import predict_full_text
 from app.schemas import (
     DeskClaimRef,
     PaperAcquisition,
@@ -389,7 +390,10 @@ class WorkspaceService:
         analysis_blocks = await self._analysis_blocks(
             project_id, revision, selection, records, board
         )
-        approach, difficulties, metrics = _split_constraints(project.request.constraints)
+        # NOTE: keep this distinct from ``metrics`` above — that one is the item
+        # counts object from ``self.items.metrics()``; this one is the target
+        # metrics list rebuilt from the flat constraints.
+        approach, difficulties, target_metrics = _split_constraints(project.request.constraints)
         return ProjectWorkspace(
             project_id=project.id,
             name=project.name,
@@ -443,7 +447,7 @@ class WorkspaceService:
                 "research_question": project.request.research_question,
                 "current_approach": approach,
                 "difficulties": difficulties,
-                "target_metrics": metrics,
+                "target_metrics": target_metrics,
                 "advanced": {
                     "year_from": project.request.year_from,
                     "year_to": project.request.year_to,
@@ -501,16 +505,23 @@ class WorkspaceService:
             }
         return None
 
-    def _paper_card(self, project_id, revision, paper, acquisition) -> dict:        return {
+    def _paper_card(self, project_id, revision, paper, acquisition) -> dict:
+        # ``full_text`` is the post-download truth (only set once acquisition ran);
+        # ``full_text_hint`` is the pre-selection guess shown on the picker, so a
+        # user can prefer papers that will not need a manual upload.
+        return {
             "paper_token": issue_token(project_id, "paper", f"{revision}:{paper.id}"),
             "title": paper.metadata.title,
             "authors": [author.name for author in paper.metadata.authors],
             "year": paper.metadata.year,
+            "venue": paper.metadata.venue,
+            "publisher": paper.metadata.publisher,
             "abstract": paper.metadata.abstract,
             "sources": paper.metadata.sources or [paper.metadata.source],
             "relevance": paper.relevance_score,
             "reason": paper.selection_reason,
             "full_text": acquisition.status if acquisition else None,
+            "full_text_hint": predict_full_text(paper.metadata).model_dump(mode="json"),
         }
 
     async def _paper_detail(self, project_id, paper_token, records, acquisitions) -> dict:

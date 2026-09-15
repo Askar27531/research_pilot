@@ -270,6 +270,7 @@ def render_research_materials(project_id: str, workspace: dict) -> None:
         st.markdown(f"### {paper.get('title', labels[selected])}")
         metadata = paper.get("metadata") or {}
         st.caption("来源：" + "、".join(metadata.get("sources") or [metadata.get("source", "未知")]))
+        st.caption(_paper_provenance(metadata))
         if metadata.get("abstract"):
             st.write(metadata["abstract"])
     figures = paper.get("figures", [])
@@ -343,6 +344,60 @@ def render_search_stage(project_id: str, workspace: dict) -> None:
         if submit_action(project_id, payload):
             st.session_state[f"workflow-view-{project_id}"] = 2
             st.rerun()
+
+
+def _paper_provenance(paper: dict) -> str:
+    """Journal + publisher line for a paper card, with a preprint fallback."""
+    venue = (paper.get("venue") or "").strip()
+    publisher = (paper.get("publisher") or "").strip()
+    parts = []
+    if venue:
+        parts.append(f"期刊/会议：{venue}")
+    if publisher:
+        parts.append(f"出版社：{publisher}")
+    if parts:
+        return " · ".join(parts)
+    if "arxiv" in (paper.get("sources") or []):
+        return "arXiv 预印本（来源未提供期刊与出版社）"
+    return "来源未提供期刊与出版社"
+
+
+_FULL_TEXT_BADGES = {
+    "direct": (":material/download_done:", "green"),
+    "likely": (":material/download:", "blue"),
+    "uncertain": (":material/help:", "orange"),
+    "manual": (":material/upload_file:", "gray"),
+}
+
+
+def _render_full_text_hint(paper: dict) -> None:
+    """Badge the pre-selection guess at whether the PDF can be auto-downloaded.
+
+    Falls back to the post-download status once an acquisition exists, because
+    that is a fact rather than a guess. The caption states plainly that the
+    badge is a prediction, since only a real download settles the question.
+    """
+    hint = paper.get("full_text_hint") or {}
+    status = paper.get("full_text")
+    if status:
+        st.caption(
+            {
+                "parsed": "全文状态：已获取并解析",
+                "awaiting_upload": "全文状态：自动获取失败，等待手动上传 PDF",
+                "downloading": "全文状态：正在下载",
+                "pending": "全文状态：排队等待获取",
+                "failed": "全文状态：获取失败",
+            }.get(status, f"全文状态：{status}")
+        )
+        return
+    if not hint:
+        return
+    icon, color = _FULL_TEXT_BADGES.get(hint.get("level"), (":material/help:", "gray"))
+    st.badge(hint.get("label") or "获取情况未知", icon=icon, color=color)
+    if hint.get("detail"):
+        st.caption(hint["detail"])
+
+
 def render_paper_selection(project_id: str, workspace: dict) -> None:
     if not workspace.get("search_plan"):
         st.info("请先前往“检索文献”完成一次检索。")
@@ -350,6 +405,15 @@ def render_paper_selection(project_id: str, workspace: dict) -> None:
 
     papers = workspace.get("literature") or []
     st.subheader(f"选择论文（当前结果 {len(papers)} 篇）")
+    direct = sum(
+        1 for paper in papers
+        if (paper.get("full_text_hint") or {}).get("level") == "direct"
+    )
+    if direct:
+        st.caption(
+            f"其中 {direct} 篇标注为“可直接获取”（开放获取副本，通常无需手动上传）。"
+            "该标注由元数据推断，仅供参考；若自动下载失败，系统会提示手动上传 PDF。"
+        )
     filter_text = st.text_input("筛选标题或作者", key="selection_filter")
     visible = [paper for paper in papers if filter_text.casefold() in (
         paper["title"] + " " + " ".join(paper.get("authors", []))
@@ -373,11 +437,19 @@ def render_paper_selection(project_id: str, workspace: dict) -> None:
             "确认论文并开始分析", type="primary", icon=":material/check:"
         )
     for paper in visible:
-        with st.expander(paper["title"]):
-            st.caption("、".join(paper.get("authors", [])))
-            st.write(paper.get("abstract") or "暂无摘要")
+        # Journal / publisher stay outside the expander: a collapsed Streamlit
+        # header can ellipsize a long title, which would hide the provenance.
+        with st.container(border=True):
+            st.markdown(f"**{paper['title']}**")
             if paper.get("reason"):
                 st.caption(f"相关性说明：{paper['reason']}")
+            st.caption(_paper_provenance(paper))
+            authors = "、".join(paper.get("authors", []))
+            if authors:
+                st.caption(authors)
+            _render_full_text_hint(paper)
+            with st.expander("摘要"):
+                st.write(paper.get("abstract") or "暂无摘要")
     if confirmed:
         if not selected:
             st.warning("请先选择一至两篇论文。")

@@ -48,6 +48,8 @@ from app.schemas.evidence import (
     VisualVerificationVerdict,
 )
 from app.schemas.literature import (
+    FullTextAvailability,
+    OpenAccessLocation,
     PaperAuthor,
     PaperMetadata,
     PaperRelevance,
@@ -113,10 +115,12 @@ __all__ = [
     "FigureEvidenceCreate",
     "FigureInput",
     "FigureMention",
+    "FullTextAvailability",
     "LinkedDocument",
     "LoadedSkill",
     "MethodAnalysisDraft",
     "MissingDocument",
+    "OpenAccessLocation",
     "PageInput",
     "PaperAcquisition",
     "PaperAnalysis",

@@ -8,6 +8,30 @@ class PaperAuthor(BaseModel):
     orcid: str | None = None
 
 
+class OpenAccessLocation(BaseModel):
+    """One known place a paper's full text is hosted.
+
+    Acquisition ranks these by how likely they are to download without a 403:
+    repository and preprint copies answer plain HTTP clients, while publisher
+    endpoints frequently block them on sight. Fields stay plain ``str`` rather
+    than ``HttpUrl`` because this comes straight from a third-party API — one
+    malformed URL must not reject the whole paper record.
+    """
+
+    #: Best URL this location offers: the PDF when known, else its landing page.
+    url: str = Field(min_length=1)
+    pdf_url: str | None = None
+    landing_page_url: str | None = None
+    host_type: str | None = None  # OpenAlex: "repository" | "publisher"
+    source_type: str | None = None  # OpenAlex source.type: "repository" | "journal"…
+    version: str | None = None  # publishedVersion | acceptedVersion | submittedVersion
+    license: str | None = None
+    is_oa: bool = False
+    #: Set once a download attempt proved the URL permanently gone (404/410), so
+    #: later runs stop re-trying a link OpenAlex has not refreshed.
+    stale: bool = False
+
+
 class PaperMetadata(BaseModel):
     stable_id: str = Field(min_length=1)
     source_id: str = Field(min_length=1)
@@ -17,8 +41,13 @@ class PaperMetadata(BaseModel):
     abstract: str | None = None
     doi: str | None = None
     venue: str | None = None
+    publisher: str | None = None
     citation_count: int = Field(default=0, ge=0)
     open_access_url: HttpUrl | None = None
+    #: Every hosting location OpenAlex knows (publisher + repositories + preprint
+    #: servers). ``open_access_url`` stays as the single-URL compatibility field
+    #: for rows stored before this list existed.
+    oa_locations: list[OpenAccessLocation] = Field(default_factory=list)
     arxiv_id: str | None = None
     openalex_id: str | None = None
     source: Literal["openalex", "crossref", "arxiv"] = "openalex"
@@ -62,6 +91,26 @@ class SearchPapersInput(BaseModel):
         ):
             raise ValueError("year_from must be less than or equal to year_to")
         return self
+
+
+class FullTextAvailability(BaseModel):
+    """Pre-download guess at whether a paper's PDF can be fetched automatically.
+
+    Shown while the user picks papers, i.e. before any download has been
+    attempted, so it must never read as a promise: it only reflects what the
+    stored metadata knows about *where* the full text lives. The tiers follow
+    the acquisition ranking in ``app.literature.open_access`` — repository and
+    preprint copies answer plain HTTP clients, publisher endpoints often answer
+    403 — so ``uncertain`` is a real, useful warning rather than noise.
+    """
+
+    level: Literal["direct", "likely", "uncertain", "manual"]
+    label: str
+    detail: str
+    #: Host that would be tried first, for the "来源：doi.org" style hint.
+    host: str | None = None
+    #: How many distinct URLs acquisition would attempt.
+    candidates: int = Field(default=0, ge=0)
 
 
 class SearchResult(BaseModel):
